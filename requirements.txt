@@ -1,8 +1,0 @@
-# Install the CPU-only PyTorch build first (about 200 MB; the default build from PyPI pulls CUDA and is several GB):
-#   pip install torch --index-url https://download.pytorch.org/whl/cpu
-# Then install the rest:
-#   pip install -r requirements.txt
-torch
-numpy
-pyyaml
-pytest
