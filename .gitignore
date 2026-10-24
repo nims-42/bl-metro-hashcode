@@ -1,1 +1,8 @@
 .venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Per-run measurements are produced by experiments/run_experiments.py
+results/*
+!results/.gitkeep
