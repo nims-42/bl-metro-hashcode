@@ -10,6 +10,7 @@ dependencies = ["torch", "numpy", "pyyaml"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+dashboard = ["streamlit"]
 
 [project.scripts]
 swim-straggler = "swim_straggler.cli:main"

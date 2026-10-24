@@ -6,7 +6,7 @@ a healthy worker, and it must never change what the training learns.
 
 import pytest
 
-from swim_straggler.config import ConfigError, DetectorConfig, FaultConfig
+from swim_straggler.config import DetectorConfig, FaultConfig
 from swim_straggler.telemetry.events import read_events, summarize_detection
 from swim_straggler.train.launcher import run_training
 from test_training import make_config
@@ -66,11 +66,6 @@ def test_step_events_carry_the_wait_of_every_round(tmp_path):
 def test_detector_off_writes_no_detector_events(tmp_path):
     events = read_events(run_training(config_with_detector(tmp_path, DetectorConfig(mode="off"), steps=12)).events_path)
     assert [event for event in events if event["event"] == "detector"] == []
-
-
-def test_baseline_modes_are_not_available_yet(tmp_path):
-    with pytest.raises(ConfigError, match="milestone 6"):
-        run_training(config_with_detector(tmp_path, DetectorConfig(mode="central"), steps=5))
 
 
 @pytest.mark.slow

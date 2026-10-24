@@ -22,6 +22,7 @@ How to use it from a training loop (one detector object per worker):
 import random
 from dataclasses import dataclass
 
+from swim_straggler.detector.base import Detector
 from swim_straggler.detector.gossip import (
     CLEARED_VERDICT,
     STRAGGLER_VERDICT,
@@ -46,7 +47,7 @@ class Probe:
     peers: list
 
 
-class StragglerDetector:
+class StragglerDetector(Detector):
     def __init__(self, rank, world_size, config, seed=0):
         """`config` is a DetectorConfig (any object with the same fields works)."""
         self.rank = rank
@@ -97,7 +98,7 @@ class StragglerDetector:
         for notice in notices:
             self.handle_notice(notice)
 
-    def finish_step(self, step, wait_seconds_per_round):
+    def finish_step(self, step, wait_seconds_per_round, compute_seconds_of_every_worker=None):
         """Run the detection logic once the all-reduce of this step is done. Returns the events since the last call."""
         if step >= self.config.warmup_steps:
             self.update_accusation(wait_seconds_per_round)

@@ -18,6 +18,9 @@ from torch.nn import functional
 from swim_straggler.allreduce.header import Header, HeaderCodec
 from swim_straggler.allreduce.ring import ring_allreduce
 from swim_straggler.config import ConfigError
+from swim_straggler.detector.base import Detector
+from swim_straggler.detector.central import CentralMonitor
+from swim_straggler.detector.steptime import StepTimeDetector
 from swim_straggler.detector.swim import StragglerDetector
 from swim_straggler.faults.inject import FaultInjector, SlowLinkTransport
 from swim_straggler.telemetry.events import EventLogger
@@ -41,20 +44,33 @@ def create_model_with_seed(seed):
 
 
 def create_detector(config, rank, world_size):
-    """The straggler detector of this worker, or None when detection is switched off."""
+    """The detector of this worker. Mode "off" gives a detector that does nothing."""
     mode = config.detector.mode
     if mode == "off":
-        return None
+        return Detector()
     if mode == "swim":
         return StragglerDetector(rank, world_size, config.detector, seed=config.train.seed)
-    raise ConfigError(f"detector.mode '{mode}' is not implemented yet (the baselines arrive in milestone 6)")
+    if mode == "central":
+        return CentralMonitor(rank, world_size, config.detector)
+    if mode == "steptime":
+        return StepTimeDetector(rank, world_size, config.detector)
+    raise ConfigError(f"unknown detector.mode '{mode}'")
 
 
-def flatten_gradients_with_loss(model, loss):
-    """One vector: every gradient value in parameter order, then the loss as the last element."""
+def flatten_gradients_with_loss(model, loss, extra_values=None):
+    """One vector: every gradient value in parameter order, then the loss, then any extra values."""
     gradient_pieces = [parameter.grad.flatten() for parameter in model.parameters()]
     gradient_pieces.append(loss.detach().reshape(1))
+    if extra_values is not None:
+        gradient_pieces.append(extra_values)
     return torch.cat(gradient_pieces)
+
+
+def compute_report_slots(rank, world_size, compute_seconds):
+    """N numbers: my compute time in my own slot, zeros elsewhere. Summed over all workers, they hold everyone's."""
+    slots = torch.zeros(world_size)
+    slots[rank] = compute_seconds
+    return slots
 
 
 def write_averaged_gradients_back(model, summed_vector, world_size):
@@ -88,7 +104,7 @@ def train_one_rank(transport, config, dataset_source, run_directory):
     fault_injector = FaultInjector(config.fault, rank)
     transport = SlowLinkTransport(transport, fault_injector)
     detector = create_detector(config, rank, world_size)
-    codec = HeaderCodec(gossip_length=detector.gossip_length if detector else 0)
+    codec = HeaderCodec(gossip_length=detector.gossip_length)
 
     if rank == 0:
         logger.log("run_start", config=config.to_dict(), dataset_source=dataset_source, world_size=world_size)
@@ -115,37 +131,36 @@ def train_one_rank(transport, config, dataset_source, run_directory):
             logger.log("fault_started", step=step, fault_kind=config.fault.kind)
             fault_start_logged = True
 
-        # 2. all-reduce (the detector rides along: its gossip travels in the header of every message)
+        # 2. all-reduce (the SWIM detector rides along: its gossip travels in the header of every message)
         def build_header():
-            gossip = tuple(detector.make_gossip()) if detector else ()
             return Header(sender=rank, step=step, compute_time=compute_seconds,
-                          wait_time=previous_wait_seconds, gossip=gossip)
+                          wait_time=previous_wait_seconds, gossip=tuple(detector.make_gossip()))
 
         def absorb_header(received_header, round_number):
             detector.receive_gossip(received_header.gossip)
 
-        if detector:
-            detector.start_step(step, compute_seconds)
+        detector.start_step(step, compute_seconds)
 
         transport.current_step = step
-        vector = flatten_gradients_with_loss(model, loss)
+        report_slots = compute_report_slots(rank, world_size, compute_seconds) if detector.needs_compute_reports else None
+        vector = flatten_gradients_with_loss(model, loss, report_slots)
         allreduce_start_time = time.perf_counter()
         wait_seconds_per_round = ring_allreduce(
-            transport, vector, codec, make_header=build_header,
-            on_header_received=absorb_header if detector else None,
+            transport, vector, codec, make_header=build_header, on_header_received=absorb_header,
         )
         allreduce_seconds = time.perf_counter() - allreduce_start_time
         wait_seconds = sum(wait_seconds_per_round)
         previous_wait_seconds = wait_seconds
 
-        if detector:
-            for detector_event in detector.finish_step(step, wait_seconds_per_round):
-                logger.log("detector", **detector_event)
+        compute_of_every_worker = vector[-world_size:].tolist() if detector.needs_compute_reports else None
+        for detector_event in detector.finish_step(step, wait_seconds_per_round, compute_of_every_worker):
+            logger.log("detector", **detector_event)
 
         # 3. update
         average_loss = write_averaged_gradients_back(model, vector, world_size)
         optimizer.step()
 
+        step_seconds = time.perf_counter() - step_start_time
         logger.log(
             "step",
             step=step,
@@ -154,15 +169,17 @@ def train_one_rank(transport, config, dataset_source, run_directory):
             wait_seconds=wait_seconds,
             wait_seconds_per_round=wait_seconds_per_round,
             allreduce_seconds=allreduce_seconds,
-            step_seconds=time.perf_counter() - step_start_time,
+            step_seconds=step_seconds,
             fault_active=fault_is_active,
             injected_compute_seconds=injected_seconds,
         )
+        for detector_event in detector.after_update(step, step_seconds):
+            logger.log("detector", **detector_event)
 
     logger.log(
         "run_end",
         parameter_checksum=parameter_checksum(model),
-        believed_stragglers=detector.straggler_ranks() if detector else [],
+        believed_stragglers=detector.straggler_ranks(),
         seconds_since_start=time.perf_counter() - run_start_time,
     )
     logger.close()

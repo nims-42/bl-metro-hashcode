@@ -367,3 +367,11 @@ def test_delays_are_given_from_issue_and_from_application():
     events.append({"event": "detector", "rank": 0, "step": 30, "action": "confirmed", "subject": 1})
     report = summarize_detection(events)["per_fault"][1]
     assert (report["delay_steps"], report["delay_steps_after_applied"]) == (10, 4)
+
+
+def test_accusing_the_culprit_before_its_fault_started_is_a_false_alarm_not_a_detection():
+    events = make_events(0.010, 0.020)
+    events.append({"event": "detector", "rank": 0, "step": 12, "action": "confirmed", "subject": 1})
+    summary = summarize_detection(events)
+    assert summary["per_fault"][1]["first_confirmed_step"] is None
+    assert summary["false_confirmations"] == [(0, 1, 12)]

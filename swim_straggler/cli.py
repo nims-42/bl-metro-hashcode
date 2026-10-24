@@ -1,12 +1,15 @@
-"""Command line entry point: train, demo, build-image (Docker) and worker (one worker, used inside containers)."""
+"""Command line entry point: train, demo (--compare for the baselines), dashboard, build-image (Docker) and worker (one worker, used inside containers)."""
 
 import argparse
+import copy
 import os
 import subprocess
+import sys
+from pathlib import Path
 
 from swim_straggler.config import ConfigError, load_config
 from swim_straggler.containers.commands import ContainerError
-from swim_straggler.telemetry.events import read_events, summarize_detection, summarize_training
+from swim_straggler.telemetry.events import comparison_row, read_events, summarize_detection, summarize_training
 from swim_straggler.train.launcher import run_training
 
 DEFAULT_DEMO_CONFIG = "experiments/configs/demo.yaml"
@@ -57,9 +60,15 @@ def print_detection_summary(events):
         print(f"    first confirmed by any worker : step {report['first_confirmed_step']}"
               f"  (delay {report['delay_steps']} steps after the command was issued, "
               f"{report['delay_steps_after_applied']} after it returned)")
-        print(f"    every worker knew by          : step {report['all_workers_knew_at_step']}")
-        if report["workers_that_never_learned"]:
-            print(f"    never learned                 : workers {report['workers_that_never_learned']}")
+        if summary["detector_mode"] == "central":
+            print("    every worker knew by          : not applicable (only the central monitor, worker 0, decides)")
+        else:
+            print(f"    every worker knew by          : step {report['all_workers_knew_at_step']}")
+            if report["workers_that_never_learned"]:
+                print(f"    never learned                 : workers {report['workers_that_never_learned']}")
+    if summary["detector_mode"] == "steptime":
+        print("  note: with step times only, each worker can judge nobody but itself; in synchronous training")
+        print("        all step times rise together, so healthy workers end up accusing themselves.")
     print(f"  healthy workers wrongly suspected : {summary['false_suspicions']}  (the vote rejected {summary['rejected_suspicions']} suspicions)")
     print(f"  healthy workers wrongly confirmed : {len(summary['false_confirmations'])}")
     for rank, subject, step in summary["false_confirmations"][:5]:
@@ -103,7 +112,54 @@ def command_demo(arguments):
     except (ConfigError, OSError) as error:
         print(f"error: {error}")
         return 1
+    if arguments.compare:
+        return run_comparison(config)
     return run_and_report(config)
+
+
+COMPARED_MODES = ("swim", "central", "steptime")
+
+
+def print_table(rows):
+    columns = list(rows[0])
+    widths = [max(len(column), *(len(str(row[column])) for row in rows)) for column in columns]
+    print("  ".join(column.ljust(width) for column, width in zip(columns, widths)))
+    for row in rows:
+        print("  ".join(str(row[column]).ljust(width) for column, width in zip(columns, widths)))
+
+
+def run_comparison(base_config):
+    """Run the same config once per detector, same seed and same fault, and print one line per detector."""
+    warn_if_too_many_workers(base_config)
+
+    rows = []
+    for mode in COMPARED_MODES:
+        config = copy.deepcopy(base_config)
+        config.detector.mode = mode
+        config.name = f"{base_config.name}_{mode}"
+        print(f"running detector={mode} ...")
+        try:
+            result = run_training(config)
+        except (ConfigError, ContainerError) as error:
+            print(f"error: {error}")
+            return 1
+        rows.append(comparison_row(mode, read_events(result.events_path)))
+    print()
+    print(f"fault: {base_config.fault.kind} on workers {base_config.fault.workers} from step {base_config.fault.start_step}, "
+          f"{base_config.cluster.world_size} workers, {base_config.train.steps} steps (one run each; timing varies between runs)")
+    print_table(rows)
+    return 0
+
+
+def command_dashboard(arguments):
+    """Start the Streamlit dashboard in the browser."""
+    app_path = Path(__file__).resolve().parent / "dashboard" / "app.py"
+    try:
+        import streamlit  # noqa: F401  (only to give a clear message when it is missing)
+    except ImportError:
+        print('error: the dashboard needs Streamlit. Install it with:  pip install -e ".[dashboard]"')
+        return 1
+    return subprocess.run([sys.executable, "-m", "streamlit", "run", str(app_path), "--", "--runs", arguments.runs]).returncode
 
 
 def command_worker(arguments):
@@ -147,7 +203,13 @@ def main(argument_list=None):
     demo_parser = subcommands.add_parser("demo", help="train with an injected slow worker and show what the detector found")
     demo_parser.add_argument("--config", default=DEFAULT_DEMO_CONFIG, help="config file (default: the demo config)")
     demo_parser.add_argument("--workers", type=int, help="number of workers; the slow one is placed in the middle")
+    demo_parser.add_argument("--compare", action="store_true",
+                             help="also run the baseline detectors (central monitor, step time) and print a comparison table")
     demo_parser.set_defaults(handler=command_demo)
+
+    dashboard_parser = subcommands.add_parser("dashboard", help="open the dashboard in the browser")
+    dashboard_parser.add_argument("--runs", default="runs", help="folder that holds the runs (default: runs)")
+    dashboard_parser.set_defaults(handler=command_dashboard)
 
     worker_parser = subcommands.add_parser("worker", help="run one worker (used inside containers)")
     worker_parser.add_argument("--config", required=True)

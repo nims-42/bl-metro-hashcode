@@ -6,3 +6,5 @@ torch
 numpy
 pyyaml
 pytest
+# Only for the dashboard (swim-straggler dashboard):
+streamlit
