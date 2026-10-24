@@ -29,7 +29,7 @@ The full design is in `CONTEXT.md` and the build status is in `TASKS.md`.
 
 ## Run with Docker (5 nodes)
 
-Prerequisites: Docker Desktop (WSL 2) or Docker Engine 24+ with Compose v2, and Python 3.12 with `pip install -r requirements.txt`. A per-user Docker Desktop install puts `docker` in `%LOCALAPPDATA%\Programs\DockerDesktopesourcesin`; open a new terminal after installing so it is on `PATH`.
+Prerequisites: Docker Desktop (WSL 2) or Docker Engine 24+ with Compose v2, and Python 3.12 with `pip install -r requirements.txt`. A per-user Docker Desktop install puts `docker` in `%LOCALAPPDATA%\Programs\DockerDesktop\resources\bin`; open a new terminal after installing so it is on `PATH`.
 
 ```bash
 # healthy ring, logs in results/manual/
