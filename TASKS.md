@@ -35,23 +35,23 @@ Tick a box when the task is done and committed.
 - [x] Message counters, events, member states, LHM
 
 ## 6. SWIM layer: `src/swim.py` (§3.3, §6.1, §6.4)
-- [ ] Ring view of everyone's `compute_t` / `wait_t` / `pred_lag` from relayed telemetry
-- [ ] Lateness rule: 1.1 × ring median, 10% jitter filter, N_consec late steps in a row
-- [ ] Indirect probe: `PING_REQ` to k distinct peers (never the accuser or the suspect)
-- [ ] Answering `PING_REQ` from this node's own view (agree / disagree / NACK)
-- [ ] Gossip buffer: λ·log(n) retransmits, least-sent first, at most G per message
-- [ ] Suspicion timers → `CONFIRM`; refutation with a higher incarnation
-- [ ] `tests/test_swim.py`
+- [x] Ring view of everyone's `compute_t` / `wait_t` / `pred_lag` from relayed telemetry
+- [x] Lateness rule: 1.1 × ring median, 10% jitter filter, N_consec late steps in a row
+- [x] Indirect probe: `PING_REQ` to k distinct peers (never the accuser or the suspect)
+- [x] Answering `PING_REQ` from this node's own view (agree / disagree / NACK)
+- [x] Gossip buffer: λ·log(n) retransmits, least-sent first, at most G per message
+- [x] Suspicion timers → `CONFIRM`; refutation with a higher incarnation
+- [x] `tests/test_swim.py`
 
 ## 7. Node: `src/node.py` (§3.1, §4, §7, §8)
-- [ ] `Config` dataclass with env overrides and validation (N ≥ 3, k ≤ N − 2)
-- [ ] TCP ring: connect to successor and accept from predecessor, retrying with backoff
-- [ ] Ring all-reduce (reduce-scatter + all-gather), padding when D is not divisible by N
-- [ ] `wait_t` and `pred_lag` measured with `time.monotonic()`
-- [ ] NumPy training stand-in that times `compute_t`
-- [ ] Fault hooks: sleep on the compute path or on the send path
-- [ ] TCP ping-req listener on its own port
-- [ ] `LEAVE` on clean shutdown
+- [x] `Config` dataclass with env overrides and validation (N ≥ 3, k ≤ N − 2)
+- [x] TCP ring: connect to successor and accept from predecessor, retrying with backoff
+- [x] Ring all-reduce (reduce-scatter + all-gather), padding when D is not divisible by N
+- [x] `wait_t` and `pred_lag` measured with `time.monotonic()`
+- [x] NumPy training stand-in that times `compute_t`
+- [x] Fault hooks: sleep on the compute path or on the send path
+- [x] TCP ping-req listener on its own port
+- [x] `LEAVE` on clean shutdown
 
 ## 8. Containers (§3.1, §10)
 - [ ] `Dockerfile` (python:3.12-slim, `python -m src.node`)
