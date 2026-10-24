@@ -41,10 +41,23 @@ def node_name(i):
 # Each fault: node offset from the default target (N // 2), type, delay, steps.
 # "compute" and "network" faults are injected by the node itself (sleep on the
 # compute or send path); "cpus" uses `docker update --cpus` and is Docker-only.
+# A fault with "inject": False is ground truth only: the slowness comes from the
+# scenario's per-node env instead (node_env, {node index: {VAR: value}}).
+
+COMPUTE_SPREAD_MS = (0, 10, -5, 5, -10)   # per-node offsets, inside FALCON's 10% band
+
+
+def per_node_compute_ms(n, base=100):
+    """Every node gets its own processing time; the target is twice the base."""
+    times = {i: base + COMPUTE_SPREAD_MS[i % len(COMPUTE_SPREAD_MS)] for i in range(n)}
+    times[n // 2] = 2 * base
+    return times
+
 
 def scenarios(n, steps):
     target = n // 2
     start = max(40, steps // 5)
+    compute_ms = per_node_compute_ms(n)
     return {
         "no_fault": {"faults": [], "env": {}},
         "compute_fault": {"faults": [
@@ -57,6 +70,10 @@ def scenarios(n, steps):
             {"node": (target + 1) % n, "type": "compute", "delay_ms": 75, "start_step": start}]},
         "cpu_limit": {"docker_only": True, "faults": [
             {"node": target, "type": "cpus", "cpus": 0.25, "start_after_s": 15.0}]},
+        "per_node_compute": {
+            "node_env": {i: {"COMPUTE_MS": str(ms)} for i, ms in compute_ms.items()},
+            "faults": [{"node": target, "type": "compute", "inject": False, "start_step": 0,
+                        "delay_ms": compute_ms[target] - min(compute_ms.values())}]},
     }
 
 
@@ -69,9 +86,14 @@ def expected_class(fault_type):
 def node_env(scenario, i, n, run_id, steps, overrides):
     env = {"NODE_ID": str(i), "N": str(n), "RUN_ID": run_id, "STEPS": str(steps)}
     env.update(scenario.get("env", {}))
-    env.update(overrides)
+    env.update(scenario.get("node_env", {}).get(i, {}))
+    # Plain overrides apply to every node; "GPU2.COMPUTE_MS" only to gpu2 and wins.
+    for key, value in sorted(overrides.items(), key=lambda kv: "." in kv[0]):
+        node, _, var = key.rpartition(".")
+        if not node or node.lower() == node_name(i):
+            env[var] = value
     for f in scenario["faults"]:
-        if f["node"] == i and f["type"] in ("compute", "network"):
+        if f["node"] == i and f["type"] in ("compute", "network") and f.get("inject", True):
             env.update({"FAULT_NODE": str(i), "FAULT_TYPE": f["type"],
                         "FAULT_DELAY_MS": str(f["delay_ms"]),
                         "FAULT_START_STEP": str(f["start_step"]),
@@ -166,6 +188,8 @@ def run_scenario(name, n, steps, local, overrides, run_id=None):
                                                                     **overrides},
                     "started_ts": time.time(),
                     "faults": [{**f, "node": node_name(f["node"])} for f in scenario["faults"]],
+                    "node_env": {node_name(i): env for i, env in
+                                 scenario.get("node_env", {}).items()},
                     "faults_applied": []}
     save_json(os.path.join(run_dir, "ground_truth.json"), ground_truth)
     timeout = steps * 1.0 + 120
@@ -207,7 +231,11 @@ def fault_start(fault, logs):
         for e in r["events"]:
             if e["type"] == "FAULT_START":
                 return r["step"], e["ts"]
-    return fault.get("start_step"), None
+    step = fault.get("start_step")
+    if step is not None and step < len(records):
+        # No FAULT_START event (slowness set through env): the step's start time.
+        return step, records[step]["ts"] - records[step]["step_t"]
+    return step, None
 
 
 def first_event(logs, kind, about, origin_only=False):

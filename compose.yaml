@@ -4,8 +4,13 @@
 #   FAULT_NODE=2 FAULT_TYPE=compute FAULT_DELAY_MS=100 FAULT_START_STEP=60 \
 #     RUN_ID=demo docker compose up --build          # one slow GPU
 #
+#   GPU2_COMPUTE_MS=200 GPU1_COMPUTE_MS=110 RUN_ID=hetero docker compose up --build
+#                                                    # per-node processing time
+#
 # Every node gets the same fault variables and applies them only if its own id
-# is in FAULT_NODE. Results land in ./results/<RUN_ID>/gpu<i>.jsonl.
+# is in FAULT_NODE. COMPUTE_MS sets every node's processing time and
+# GPU<i>_COMPUTE_MS overrides it for one node. Console lines are prefixed with
+# the node name; results land in ./results/<RUN_ID>/gpu<i>.jsonl.
 #
 # To scale: copy a service, give it the next NODE_ID, and set N. Nothing in
 # src/ changes. experiments/run_experiments.py generates this file for any N.
@@ -33,23 +38,24 @@ x-node: &node
     FAULT_DELAY_MS: ${FAULT_DELAY_MS:-0}
     FAULT_START_STEP: ${FAULT_START_STEP:-0}
     FAULT_END_STEP: ${FAULT_END_STEP:--1}
+    LOG_EVERY: ${LOG_EVERY:-25}
 
 services:
   gpu0:
     <<: *node
-    environment: {<<: *node-env, NODE_ID: "0"}
+    environment: {<<: *node-env, NODE_ID: "0", COMPUTE_MS: "${GPU0_COMPUTE_MS:-${COMPUTE_MS:-100}}"}
   gpu1:
     <<: *node
-    environment: {<<: *node-env, NODE_ID: "1"}
+    environment: {<<: *node-env, NODE_ID: "1", COMPUTE_MS: "${GPU1_COMPUTE_MS:-${COMPUTE_MS:-100}}"}
   gpu2:
     <<: *node
-    environment: {<<: *node-env, NODE_ID: "2"}
+    environment: {<<: *node-env, NODE_ID: "2", COMPUTE_MS: "${GPU2_COMPUTE_MS:-${COMPUTE_MS:-100}}"}
   gpu3:
     <<: *node
-    environment: {<<: *node-env, NODE_ID: "3"}
+    environment: {<<: *node-env, NODE_ID: "3", COMPUTE_MS: "${GPU3_COMPUTE_MS:-${COMPUTE_MS:-100}}"}
   gpu4:
     <<: *node
-    environment: {<<: *node-env, NODE_ID: "4"}
+    environment: {<<: *node-env, NODE_ID: "4", COMPUTE_MS: "${GPU4_COMPUTE_MS:-${COMPUTE_MS:-100}}"}
 
 networks:
   ring-net:
