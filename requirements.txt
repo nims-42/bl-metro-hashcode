@@ -1,0 +1,22 @@
+# swim-lifeguard: Decentralised Straggler Detection using SWIM (Blue Line Metro, Hashcode 14)
+# Python 3.12 (Docker base image: python:3.12-slim)
+#
+# NOT pip packages. Install these on the host machine:
+#   - Docker Desktop (Windows: WSL 2 backend, Linux containers) or Docker Engine 24+
+#   - Docker Compose v2 (the `docker compose` command, bundled with Docker Desktop)
+#
+# Standard library, nothing to install:
+#   socket (TCP ring + ping-req), multiprocessing, threading, json, csv,
+#   time (monotonic + wall clock), random, dataclasses, statistics, argparse, logging, subprocess
+
+# --- Node runtime: used inside each of the N containers (src/) ---
+numpy==2.2.6            # gradient stand-in, chunk splitting, median and window maths
+
+# --- Experiment runner: used on the host (experiments/run_experiments.py) ---
+docker==7.1.0           # Docker SDK: start/stop gpu0..gpu{N-1}, `update --cpus` fault injection,
+                        # container status; metrics are read from results/<run_id>/*.jsonl
+
+# --- Tests (tests/) ---
+pytest==8.4.1
+
+# Dashboard is deferred: add a plotting library here when it is built.
