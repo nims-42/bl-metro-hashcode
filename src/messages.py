@@ -62,11 +62,14 @@ def telemetry_entry(node_id, step, compute_t, wait_t, pred_lag):
 
 
 def make_header(src, step, phase, chunk_idx, send_ts, compute_t, wait_t,
-                telemetry, gossip, max_telemetry, max_gossip):
+                telemetry, gossip, max_telemetry, max_gossip, fwd_wait=0.0):
     """Piggyback header for one ring chunk (section 5.1).
 
-    `telemetry` and `gossip` are truncated to their bounds here so a caller
-    can never grow the header with N or with the gossip backlog.
+    `fwd_wait` [OUR CHOICE] is how long the sender was blocked on the receive
+    just before this send, so the receiver can tell inherited delay from delay
+    that originates at the sender. `telemetry` and `gossip` are truncated to
+    their bounds here so a caller can never grow the header with N or with the
+    gossip backlog.
     """
     return {
         "src": src,
@@ -76,6 +79,7 @@ def make_header(src, step, phase, chunk_idx, send_ts, compute_t, wait_t,
         "send_ts": float(send_ts),
         "compute_t": float(compute_t),
         "wait_t": float(wait_t),
+        "fwd_wait": float(fwd_wait),
         "telemetry": list(telemetry)[:max_telemetry],
         "gossip": list(gossip)[:max_gossip],
     }

@@ -4,7 +4,7 @@ import pytest
 
 from src import messages as msg
 from src.lifeguard import COMPUTE, NETWORK, LocalHealth, Lifeguard, exceeds
-from src.membership import ALIVE, FAILED
+from src.membership import ALIVE, FAILED, LEFT
 
 
 class FakeClock:
@@ -99,16 +99,25 @@ def test_exceeds_needs_both_factor_and_jitter_floor():
 def test_self_check_blocks_accusation_when_this_node_is_the_outlier():
     lg = make()
     s = stats(compute=[0.10, 0.10, 0.30, 0.10, 0.10], wait=[0.2, 0.2, 0.0, 0.2, 0.2])
-    assert lg.is_self_outlier(s, "gpu2", floor=0.02)
-    assert not lg.is_self_outlier(s, "gpu3", floor=0.02)
+    assert lg.is_self_outlier(s, "gpu2", "gpu3", floor=0.02)
+    assert not lg.is_self_outlier(s, "gpu3", "gpu4", floor=0.02)
 
 
 def test_self_check_flags_the_node_that_waits_least():
     lg = make()
     s = stats(compute=[0.1] * 5, wait=[0.20, 0.21, 0.01, 0.19, 0.20])
     assert lg.waits_least(s, "gpu2", floor=0.02)
-    assert lg.is_self_outlier(s, "gpu2", floor=0.02)
+    assert lg.is_self_outlier(s, "gpu2", "gpu3", floor=0.02)
     assert not lg.waits_least(s, "gpu3", floor=0.02)
+
+
+def test_self_check_flags_a_node_whose_successor_reports_lag_from_it():
+    lg = make()
+    s = stats(compute=[0.1] * 5, wait=[0.1] * 5)
+    s["pred_lag"] = {"gpu0": 0.0, "gpu1": 0.0, "gpu2": 0.0, "gpu3": 0.075, "gpu4": 0.001}
+    assert lg.lag_from(s, "gpu3", floor=0.02)
+    assert lg.implicated(s, "gpu2", "gpu3", floor=0.02)
+    assert not lg.implicated(s, "gpu3", "gpu4", floor=0.02)
 
 
 def test_classify_high_compute_is_compute():
@@ -124,12 +133,10 @@ def test_classify_normal_compute_with_late_arrival_is_network():
 
 
 def test_refute_only_when_not_the_outlier():
-    lg = make()
-    healthy = stats([0.1] * 5, [0.2] * 5)
-    slow = stats([0.1, 0.1, 0.3, 0.1, 0.1], [0.2, 0.2, 0.0, 0.2, 0.2])
-    assert lg.should_refute(healthy, "gpu2", 0.02, ALIVE)
-    assert not lg.should_refute(slow, "gpu2", 0.02, ALIVE)
-    assert not lg.should_refute(healthy, "gpu2", 0.02, FAILED)
+    assert Lifeguard.should_refute(False, ALIVE)
+    assert not Lifeguard.should_refute(True, ALIVE)
+    assert not Lifeguard.should_refute(False, FAILED)
+    assert not Lifeguard.should_refute(False, LEFT)
 
 
 # --- Buddy System -------------------------------------------------------------

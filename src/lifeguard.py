@@ -68,6 +68,7 @@ class Suspicion:
     about: str
     started: float
     cls: str | None = None
+    origin: str | None = None
     confirmers: set = field(default_factory=set)
 
 
@@ -113,16 +114,19 @@ class Lifeguard:
         frac = math.log(confirmations + 1) / math.log(self.k_confirm + 1)
         return max(lo, hi - (hi - lo) * frac)
 
-    def start_suspicion(self, about, cls=None, confirmers=()):
-        """Start the suspicion timer for `about` unless one is running."""
+    def start_suspicion(self, about, cls=None, origin=None, confirmers=()):
+        """Start the suspicion timer for `about` unless one is running.
+        `origin` raised the suspicion; `confirmers` already back it up."""
         if about not in self._suspicions:
-            self._suspicions[about] = Suspicion(about, self._clock(), cls, set(confirmers))
+            self._suspicions[about] = Suspicion(about, self._clock(), cls, origin,
+                                                set(confirmers) - {origin})
         return self._suspicions[about]
 
     def add_confirmation(self, about, from_):
-        """Count an independent confirmation. Returns True if it was new."""
+        """Count an independent confirmation (not the origin, not a repeat).
+        Returns True if it was new."""
         s = self._suspicions.get(about)
-        if s is None or from_ in s.confirmers:
+        if s is None or from_ == s.origin or from_ in s.confirmers:
             return False
         s.confirmers.add(from_)
         return True
@@ -161,9 +165,23 @@ class Lifeguard:
             return False
         return exceeds(statistics.median(values.values()), mine, self.factor, floor)
 
-    def is_self_outlier(self, stats, self_id, floor):
+    def lag_from(self, stats, succ, floor):
+        """Did `succ` report lag originating at its predecessor this step?"""
+        values = stats.get("pred_lag", {})
+        if succ not in values or len(values) < 2:
+            return False
+        return exceeds(values[succ], statistics.median(values.values()), self.factor, floor)
+
+    def implicated(self, stats, node, succ, floor):
+        """Does the ring view point at `node` (with successor `succ`) as a
+        straggler this step? Slow compute, the waits-least signature, or its
+        successor reporting lag that originates at it."""
+        return (self.slow_compute(stats, node, floor) or self.waits_least(stats, node, floor)
+                or self.lag_from(stats, succ, floor))
+
+    def is_self_outlier(self, stats, self_id, succ, floor):
         """Am I the slow one? If so, my view of others is not trusted (6.2)."""
-        return self.slow_compute(stats, self_id, floor) or self.waits_least(stats, self_id, floor)
+        return self.implicated(stats, self_id, succ, floor)
 
     def classify(self, stats_window, suspect, floor):
         """FALCON split (6.5): mostly-slow compute_t -> compute, else network."""
@@ -182,9 +200,10 @@ class Lifeguard:
         return first + rest
 
     # --- Refutation (3.3 step 5) -------------------------------------------
-    def should_refute(self, stats, self_id, floor, my_state):
+    @staticmethod
+    def should_refute(self_outlier, my_state):
         """A suspected node refutes only when its own self-check says it is
         not the outlier; a node that knows it is slow accepts the verdict."""
-        if my_state == membership.FAILED:
+        if my_state in (membership.FAILED, membership.LEFT):
             return False
-        return not self.is_self_outlier(stats, self_id, floor)
+        return not self_outlier
