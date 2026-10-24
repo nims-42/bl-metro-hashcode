@@ -54,8 +54,8 @@ Tick a box when the task is done and committed.
 - [x] `LEAVE` on clean shutdown
 
 ## 8. Containers (§3.1, §10)
-- [ ] `Dockerfile` (python:3.12-slim, `python -m src.node`)
-- [ ] `compose.yaml`: gpu0…gpu4 on `ring-net`, shared `x-node` anchor, `./results` → `/results`
+- [x] `Dockerfile` (python:3.12-slim, `python -m src.node`)
+- [x] `compose.yaml`: gpu0…gpu4 on `ring-net`, shared `x-node` anchor, `./results` → `/results`
 
 ## 9. Experiments: `experiments/run_experiments.py` (§3.4, §8, §9)
 - [ ] Scenarios: no fault, compute fault, network fault, jitter only, slow accuser

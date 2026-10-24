@@ -1,0 +1,56 @@
+# Five-node ring: gpu0 -> gpu1 -> gpu2 -> gpu3 -> gpu4 -> gpu0 on bridge network ring-net.
+#
+#   docker compose up --build                        # healthy run
+#   FAULT_NODE=2 FAULT_TYPE=compute FAULT_DELAY_MS=100 FAULT_START_STEP=60 \
+#     RUN_ID=demo docker compose up --build          # one slow GPU
+#
+# Every node gets the same fault variables and applies them only if its own id
+# is in FAULT_NODE. Results land in ./results/<RUN_ID>/gpu<i>.jsonl.
+#
+# To scale: copy a service, give it the next NODE_ID, and set N. Nothing in
+# src/ changes. experiments/run_experiments.py generates this file for any N.
+
+name: swim-lifeguard
+
+x-node: &node
+  build: .
+  image: swim-lifeguard:latest
+  networks: [ring-net]
+  volumes:
+    - ./results:/results
+  environment: &node-env
+    N: "5"
+    RUN_ID: ${RUN_ID:-manual}
+    STEPS: ${STEPS:-300}
+    JITTER_MS: ${JITTER_MS:-0}
+    DETECTION: ${DETECTION:-1}
+    K: ${K:-2}
+    N_CONSEC: ${N_CONSEC:-3}
+    ALPHA: ${ALPHA:-5}
+    BETA: ${BETA:-6}
+    FAULT_NODE: ${FAULT_NODE:-}
+    FAULT_TYPE: ${FAULT_TYPE:-}
+    FAULT_DELAY_MS: ${FAULT_DELAY_MS:-0}
+    FAULT_START_STEP: ${FAULT_START_STEP:-0}
+    FAULT_END_STEP: ${FAULT_END_STEP:--1}
+
+services:
+  gpu0:
+    <<: *node
+    environment: {<<: *node-env, NODE_ID: "0"}
+  gpu1:
+    <<: *node
+    environment: {<<: *node-env, NODE_ID: "1"}
+  gpu2:
+    <<: *node
+    environment: {<<: *node-env, NODE_ID: "2"}
+  gpu3:
+    <<: *node
+    environment: {<<: *node-env, NODE_ID: "3"}
+  gpu4:
+    <<: *node
+    environment: {<<: *node-env, NODE_ID: "4"}
+
+networks:
+  ring-net:
+    driver: bridge
