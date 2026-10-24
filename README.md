@@ -24,11 +24,12 @@ The full design is in `CONTEXT.md` and the build status is in `TASKS.md`.
 - **Lateness (FALCON).** The predecessor is late in a step if its `pred_lag` or its reported `compute_t` is above 1.1 × the ring median and above 10% of the step time. A suspicion needs N_consec late steps in a row (scaled by LHM + 1). Step time must also have risen by at least 10%; otherwise the streak is jitter.
 - **Self-check (Lifeguard).** A node that the ring view itself implicates does not accuse anyone. It is implicated if its compute is slow, it waits least, or its own successor reports lag from it.
 - **Confirm (SWIM).** `PING_REQ` goes to k = 2 random peers. Each answers from its own copy of the ring telemetry: agree, disagree, or `NACK` if it has no data. If a majority agrees, `SUSPECT` is gossiped and the Lifeguard suspicion timer starts, already shortened by the agreeing peers. If the suspected node's own view clears it, it refutes with a higher incarnation. Otherwise the timer ends in `CONFIRM` with the class. If peers disagree, the suspicion is dropped and the accuser's LHM goes up.
+- **Recovery.** While suspected, a node re-runs its self-check every step. Once N_consec steps in a row no longer implicate it, it refutes with a higher incarnation, so a brief slowdown is cleared before the suspicion times out.
 - **Class (FALCON).** If the suspect's `compute_t` is slow it is a **compute** straggler; otherwise it is a **network** straggler.
 
 ## Run with Docker (5 nodes)
 
-Prerequisites: Docker Desktop (WSL 2) or Docker Engine 24+ with Compose v2, and Python 3.12 with `pip install -r requirements.txt`.
+Prerequisites: Docker Desktop (WSL 2) or Docker Engine 24+ with Compose v2, and Python 3.12 with `pip install -r requirements.txt`. A per-user Docker Desktop install puts `docker` in `%LOCALAPPDATA%\Programs\DockerDesktopesourcesin`; open a new terminal after installing so it is on `PATH`.
 
 ```bash
 # healthy ring, logs in results/manual/
@@ -55,7 +56,7 @@ Scenarios: `no_fault`, `compute_fault`, `network_fault` (sleep on the send path)
 
 ## Run without Docker
 
-Add `--local` to start the same N nodes as processes on 127.0.0.1, each with its own ports:
+Add `--local` to start the same N nodes as processes on 127.0.0.1, each with its own ports. Local nodes use `COMPUTE_MODE=sleep`: CPU limits only exist under Docker, and N busy processes on one desktop add enough noise to cause false suspicions. `cpu_limit` is skipped.
 
 ```bash
 python experiments/run_experiments.py all --n 5 --local
@@ -79,4 +80,4 @@ The tests cover SWIM precedence, LHM and the LHA-Suspicion formula with an injec
 
 ## Main parameters (env var = default)
 
-`N=5`, `K=2` (≤ N − 2), `N_CONSEC=3`, `LATENESS_FACTOR=1.1`, `JITTER_THRESHOLD=0.10`, `LHM_MAX=8`, `BASE_PROBE_TIMEOUT=0.5`, `PROBE_INTERVAL=1.0`, `ALPHA=5`, `BETA=6` (use 2, 2 for faster detection), `K_CONFIRM=3`, `GOSSIP_LAMBDA=3`, `GOSSIP_MAX=6`, `COMPUTE_MS=100`, `STEPS=300`. The full list is the `Config` dataclass in `src/node.py`.
+`N=5`, `K=2` (≤ N − 2), `N_CONSEC=3`, `LATENESS_FACTOR=1.1`, `JITTER_THRESHOLD=0.10`, `LHM_MAX=8`, `BASE_PROBE_TIMEOUT=0.5`, `PROBE_INTERVAL=1.0`, `ALPHA=5`, `BETA=6` (use 2, 2 for faster detection), `K_CONFIRM=3`, `GOSSIP_LAMBDA=3`, `GOSSIP_MAX=6`, `COMPUTE_MS=100`, `COMPUTE_MODE=work` (calibrated CPU work; `sleep` for local runs), `STEPS=300`. The full list is the `Config` dataclass in `src/node.py`.

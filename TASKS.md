@@ -59,7 +59,7 @@ Tick a box when the task is done and committed.
 
 ## 9. Experiments: `experiments/run_experiments.py` (§3.4, §8, §9)
 - [x] Scenarios: no fault, compute fault, network fault, jitter only, slow accuser
-- [x] Generated per-run compose file for any N; `docker update --cpus` fault (written, **not yet run: no Docker on the dev machine**)
+- [x] Generated per-run compose file for any N; `docker update --cpus` fault (verified under Docker Compose)
 - [x] Ground truth to `results/<run_id>/ground_truth.json`
 - [x] Summary: detection latency (steps, seconds, full dissemination), FP / FP-, classification accuracy, extra messages
 - [x] Overhead: step time with detection on vs off
@@ -69,11 +69,14 @@ Tick a box when the task is done and committed.
 - [x] `README.md`: build, run a scenario, read the results
 - [x] All tests pass at several values of N
 - [x] End-to-end run of every scenario at N = 5 (`--local` processes; N = 8 checked too)
-- [ ] End-to-end run under Docker Compose, including `cpu_limit`
+- [x] End-to-end run under Docker Compose, including `cpu_limit` (0 false positives across all six scenarios)
+- [x] Training stand-in does real CPU work (`COMPUTE_MODE=work`) so `docker update --cpus` actually slows a node; `--local` uses `sleep`
+- [x] A suspected node re-checks itself every step and refutes once it is back on time (fixes false positives from transient host noise)
 
 ## Open findings from the first runs
-- [ ] `slow_accuser`: when the straggler's successor is also slow, the self-check correctly holds its accusation, but then nobody else observes the original straggler directly, so it goes undetected (its slow successor is still caught). Decide whether a peer may raise a suspicion from telemetry alone.
+- [ ] `slow_accuser`: when the straggler's successor is also slow, the self-check holds its accusation and only the successor observes the straggler directly. Under `--local` the original straggler is never caught; under Docker it was caught only after ~46 s (its slow successor is caught in ~8 s). Decide whether a peer may raise a suspicion from telemetry alone.
 - [ ] Detection takes ~8 s at N = 5 with α = 5, β = 6 (suspicion timeout). Try α = β = 2 and re-measure false positives under jitter.
+- [ ] Under Docker, host noise briefly suspects healthy nodes (1 per 300-step healthy run, 7 under 30 ms jitter); all were refuted before the timeout. Watch this when scaling N.
 - [ ] A confirmed straggler stays `Failed` after its fault ends (CONFIRM is final in SWIM). Decide on recovery once mitigation is in scope.
 - [ ] Reconcile with the `nims/skeleton` branch, which uses a different layout (`swim_straggler/`).
 
