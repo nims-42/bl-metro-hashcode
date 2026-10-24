@@ -161,10 +161,13 @@ def comparison_row(mode, events):
     culprit_reports = list(summary["per_fault"].values())
     confirmed = [report for report in culprit_reports if report["first_confirmed_step"] is not None]
     delays = [report["delay_steps"] for report in culprit_reports if report["delay_steps"] is not None]
+    applied_delays = [report["delay_steps_after_applied"] for report in culprit_reports
+                      if report["delay_steps_after_applied"] is not None]
     return {
         "mode": mode,
         "culprits found": f"{len(confirmed)} of {len(culprit_reports)}",
         "delay (steps)": ", ".join(str(delay) for delay in delays) or "-",
+        "delay after fault applied (steps)": ", ".join(str(delay) for delay in applied_delays) or "-",
         "healthy wrongly confirmed": len(summary["false_confirmations"]),
         "healthy wrongly suspected": summary["false_suspicions"],
         "mean step (ms)": f"{training['mean_step_seconds'] * 1000:.1f}",

@@ -1,0 +1,15 @@
+# The same comparison in Docker containers, with a real processor throttle (docker update).
+# Needs Docker and the image (swim-straggler build-image). 21 runs; each takes longer than a process run.
+name: docker
+base_config: ../configs/docker_cpu.yaml
+overrides:
+  train: {steps: 150, dataset: synthetic}
+repeats: 3
+faults:
+  - {label: healthy, kind: none}
+  - {label: cpu-x2, kind: container_cpu, workers: [2], multiplier: 2.0, start_step: 50}
+detectors:
+  - {label: "off", mode: "off", only_faults: [healthy]}
+  - {label: swim, mode: swim, k_probes: 2}
+  - {label: central, mode: central}
+  - {label: steptime, mode: steptime}

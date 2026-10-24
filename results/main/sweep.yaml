@@ -1,0 +1,20 @@
+# The main sweep: every detector on a healthy run and on three sizes of slow worker.
+# Run it with:  swim-straggler sweep --spec experiments/sweeps/main.yaml
+# 51 runs; about 10 minutes on 2 processors. It can be stopped and started again: finished runs are kept.
+name: main
+base_config: ../configs/demo.yaml
+overrides:
+  cluster: {world_size: 4, backend: gloo}
+  train: {steps: 200, dataset: synthetic}
+repeats: 3
+faults:
+  - {label: healthy, kind: none}
+  - {label: x1.5, kind: compute, workers: [2], multiplier: 1.5, start_step: 60}
+  - {label: x2, kind: compute, workers: [2], multiplier: 2.0, start_step: 60}
+  - {label: x4, kind: compute, workers: [2], multiplier: 4.0, start_step: 60}
+detectors:
+  - {label: "off", mode: "off", only_faults: [healthy]}   # only to measure the cost of the others
+  - {label: swim, mode: swim}                              # default thresholds: factor 1.3, 5 steps
+  - {label: swim-strict, mode: swim, factor: 1.5, consecutive_steps: 8}
+  - {label: central, mode: central}
+  - {label: steptime, mode: steptime}

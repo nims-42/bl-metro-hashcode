@@ -1,4 +1,4 @@
-"""Command line entry point: train, demo (--compare for the baselines), dashboard, build-image (Docker) and worker (one worker, used inside containers)."""
+"""Command line entry point: train, demo (--compare for the baselines), sweep, report, dashboard, build-image (Docker) and worker (one worker, used inside containers)."""
 
 import argparse
 import copy
@@ -9,7 +9,7 @@ from pathlib import Path
 
 from swim_straggler.config import ConfigError, load_config
 from swim_straggler.containers.commands import ContainerError
-from swim_straggler.telemetry.events import comparison_row, read_events, summarize_detection, summarize_training
+from swim_straggler.telemetry.events import read_events, summarize_detection, summarize_training
 from swim_straggler.train.launcher import run_training
 
 DEFAULT_DEMO_CONFIG = "experiments/configs/demo.yaml"
@@ -113,7 +113,7 @@ def command_demo(arguments):
         print(f"error: {error}")
         return 1
     if arguments.compare:
-        return run_comparison(config)
+        return run_comparison(config, arguments.repeats)
     return run_and_report(config)
 
 
@@ -128,26 +128,88 @@ def print_table(rows):
         print("  ".join(str(row[column]).ljust(width) for column, width in zip(columns, widths)))
 
 
-def run_comparison(base_config):
-    """Run the same config once per detector, same seed and same fault, and print one line per detector."""
-    warn_if_too_many_workers(base_config)
+def comparison_plan(base_config, repeats):
+    """The runs of `demo --compare`: every detector, same fault, same seeds."""
+    from swim_straggler.evaluation.sweep import PlannedRun
 
+    planned = []
+    for repeat in range(repeats):
+        for mode in COMPARED_MODES:
+            config = copy.deepcopy(base_config)
+            config.detector.mode = mode
+            config.train.seed = base_config.train.seed + repeat
+            config.name = f"{base_config.name}_{mode}"
+            planned.append(PlannedRun(mode, "from config", repeat, config))
+    return planned
+
+
+def comparison_table_rows(summaries, show_applied_delay):
     rows = []
-    for mode in COMPARED_MODES:
-        config = copy.deepcopy(base_config)
-        config.detector.mode = mode
-        config.name = f"{base_config.name}_{mode}"
-        print(f"running detector={mode} ...")
-        try:
-            result = run_training(config)
-        except (ConfigError, ContainerError) as error:
-            print(f"error: {error}")
-            return 1
-        rows.append(comparison_row(mode, read_events(result.events_path)))
+    for summary in summaries:
+        delay = "-"
+        if summary["median_delay_steps"] is not None:
+            delay = f"{summary['median_delay_steps']:.0f}"
+            if summary["runs"] > 1:
+                delay += f" ({summary['min_delay_steps']:.0f}-{summary['max_delay_steps']:.0f})"
+        row = {
+            "mode": summary["detector"],
+            "culprit found": "-" if summary["found"] is None else f"{summary['found']} of {summary['runs']}",
+            "delay (steps)": delay,
+        }
+        if show_applied_delay:
+            applied = summary["median_delay_after_applied_steps"]
+            row["delay after fault command returned"] = "-" if applied is None else f"{applied:.0f}"
+        row["runs with healthy wrongly confirmed"] = f"{summary['runs_with_false_confirmation']} of {summary['runs']}"
+        row["healthy wrongly suspected"] = summary["false_suspicions"]
+        row["mean step (ms)"] = f"{summary['mean_step_ms']:.1f}"
+        rows.append(row)
+    return rows
+
+
+def run_comparison(base_config, repeats=1):
+    """Run the same config with every detector (same fault, same seeds) and print one line per detector."""
+    from swim_straggler.evaluation.metrics import summarize_sweep
+    from swim_straggler.evaluation.sweep import run_planned
+
+    warn_if_too_many_workers(base_config)
+    try:
+        rows = run_planned(comparison_plan(base_config, repeats), progress=lambda text: print("running " + text))
+    except (ConfigError, ContainerError) as error:
+        print(f"error: {error}")
+        return 1
     print()
     print(f"fault: {base_config.fault.kind} on workers {base_config.fault.workers} from step {base_config.fault.start_step}, "
-          f"{base_config.cluster.world_size} workers, {base_config.train.steps} steps (one run each; timing varies between runs)")
-    print_table(rows)
+          f"{base_config.cluster.world_size} workers, {base_config.train.steps} steps, {repeats} run(s) per detector"
+          + ("" if repeats > 1 else " (one run: timing varies between runs, use --repeats for more)"))
+    is_container_fault = base_config.fault.kind.startswith("container_")
+    print_table(comparison_table_rows(summarize_sweep(rows), show_applied_delay=is_container_fault))
+    if is_container_fault:
+        print("(container faults need time to apply: the second delay counts from when the fault command returned)")
+    return 0
+
+
+def command_sweep(arguments):
+    from swim_straggler.evaluation.report import write_results
+    from swim_straggler.evaluation.sweep import run_sweep
+
+    try:
+        results_directory, rows = run_sweep(arguments.spec, arguments.results)
+    except (ConfigError, ContainerError, OSError) as error:
+        print(f"error: {error}")
+        return 1
+    results_path = write_results(results_directory)
+    print(f"{len(rows)} runs finished. Results: {results_path}")
+    return 0
+
+
+def command_report(arguments):
+    from swim_straggler.evaluation.report import write_results
+
+    if not (Path(arguments.results) / "runs.jsonl").exists():
+        print(f"error: no runs.jsonl in {arguments.results}; run a sweep first")
+        return 1
+    results_path = write_results(arguments.results)
+    print(f"wrote {results_path} and the plots next to it")
     return 0
 
 
@@ -205,7 +267,17 @@ def main(argument_list=None):
     demo_parser.add_argument("--workers", type=int, help="number of workers; the slow one is placed in the middle")
     demo_parser.add_argument("--compare", action="store_true",
                              help="also run the baseline detectors (central monitor, step time) and print a comparison table")
+    demo_parser.add_argument("--repeats", type=int, default=1, help="with --compare: runs per detector (default 1)")
     demo_parser.set_defaults(handler=command_demo)
+
+    sweep_parser = subcommands.add_parser("sweep", help="repeat runs over detectors and faults, then write results and plots")
+    sweep_parser.add_argument("--spec", default="experiments/sweeps/main.yaml", help="sweep file (default: the main sweep)")
+    sweep_parser.add_argument("--results", default="results", help="folder for results (default: results)")
+    sweep_parser.set_defaults(handler=command_sweep)
+
+    report_parser = subcommands.add_parser("report", help="rebuild results.md and the plots from a sweep's runs.jsonl")
+    report_parser.add_argument("--results", required=True, help="a sweep's results folder, for example results/main")
+    report_parser.set_defaults(handler=command_report)
 
     dashboard_parser = subcommands.add_parser("dashboard", help="open the dashboard in the browser")
     dashboard_parser.add_argument("--runs", default="runs", help="folder that holds the runs (default: runs)")
