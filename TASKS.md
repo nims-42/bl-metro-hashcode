@@ -9,17 +9,17 @@ Tick a box when the task is done and committed.
 - [x] `TASKS.md` (this file)
 
 ## 2. Protocol messages: `src/messages.py` (§5)
-- [ ] Piggyback header with bounded telemetry (at most N entries) and gossip (at most G entries)
-- [ ] Gossip updates: `SUSPECT` / `ALIVE` / `CONFIRM` / `LEAVE`
-- [ ] Side-channel messages: `PING_REQ` / `ACK` / `NACK`
-- [ ] Length-prefixed JSON frames over TCP, with the NumPy chunk as raw bytes after the header
+- [x] Piggyback header with bounded telemetry (at most N entries) and gossip (at most G entries)
+- [x] Gossip updates: `SUSPECT` / `ALIVE` / `CONFIRM` / `LEAVE`
+- [x] Side-channel messages: `PING_REQ` / `ACK` / `NACK`
+- [x] Length-prefixed JSON frames over TCP, with the NumPy chunk as raw bytes after the header
 
 ## 3. Membership: `src/membership.py` (§6.4)
-- [ ] Member table with `Alive` / `Suspect` / `Failed` / `Left`, incarnation and class
-- [ ] SWIM precedence rules (ALIVE i > j, SUSPECT i > j / i ≥ j, CONFIRM overrides both)
-- [ ] Only the node itself can raise its own incarnation (refutation)
-- [ ] `Failed` keeps its class and the node keeps training; `LEAVE` → `Left`
-- [ ] `tests/test_membership.py`
+- [x] Member table with `Alive` / `Suspect` / `Failed` / `Left`, incarnation and class
+- [x] SWIM precedence rules (ALIVE i > j, SUSPECT i > j / i ≥ j, CONFIRM overrides both)
+- [x] Only the node itself can raise its own incarnation (refutation)
+- [x] `Failed` keeps its class and the node keeps training; `LEAVE` → `Left`
+- [x] `tests/test_membership.py`
 
 ## 4. Lifeguard: `src/lifeguard.py` (§6.2, §6.3, §6.5)
 - [ ] LHM saturating counter 0..S and its five events
