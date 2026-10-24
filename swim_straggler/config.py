@@ -8,6 +8,9 @@ from dataclasses import asdict, dataclass, field
 import yaml
 
 
+CONTAINER_FAULT_KINDS = ("container_cpu", "container_stress", "container_network_delay", "container_pause")
+
+
 class ConfigError(ValueError):
     """Raised when a configuration file is missing, misspelt or contains invalid values."""
 
@@ -15,9 +18,12 @@ class ConfigError(ValueError):
 @dataclass
 class ClusterConfig:
     world_size: int = 8
-    backend: str = "gloo"  # "gloo" (one process per worker) or "pipes" (one thread per worker)
+    backend: str = "gloo"  # "gloo" (one process per worker), "pipes" (one thread per worker) or "docker" (one container per worker)
     master_address: str = "127.0.0.1"
-    master_port: int = 0  # 0 means "choose any free port"
+    master_port: int = 0  # 0 means "choose any free port" (docker: 29500)
+    container_image: str = "swim-straggler:latest"  # docker backend only
+    container_cpus: float = 1.0  # processor limit of every worker container (docker backend only)
+    mount_source_code: bool = True  # docker: containers run the code of this folder, so code changes need no image rebuild
 
 
 @dataclass
@@ -38,6 +44,13 @@ class FaultConfig:
     # intermittent : compute slowdown that switches on and off every `period` steps
     # spike        : compute slowdown that lasts only `duration` steps
     # link         : every message the listed workers send is delayed by `link_delay_seconds`
+    # The next kinds need cluster.backend docker. They are applied from outside by the fault
+    # controller, with real tools, to the containers of the listed workers:
+    # container_cpu            : cut the container's processor share to container_cpus / multiplier, in 1 ms slices
+    #                            so every burst of computing really takes about `multiplier` times longer
+    # container_stress         : run a processor-hungry program next to the training (noisy neighbour)
+    # container_network_delay  : delay every outgoing packet by `network_delay_ms` (a slow link)
+    # container_pause          : freeze the container for `pause_seconds` (a stall, not a slowdown)
     kind: str = "none"
     workers: list = field(default_factory=list)
     multiplier: float = 2.0
@@ -46,6 +59,10 @@ class FaultConfig:
     period: int = 10  # intermittent faults: steps per on or off phase
     slowdown_style: str = "sleep"  # "sleep" frees the processor, "busy" keeps it busy like a throttled chip
     link_delay_seconds: float = 0.005  # extra delay per message for link faults
+    fault_tool: str = "docker"  # container faults: "docker" (docker update / exec) or "pumba"
+    network_delay_ms: int = 20  # container_network_delay: delay added to every packet
+    stress_workers: int = 2  # container_stress: how many processor-hungry programs run next to the training
+    pause_seconds: float = 2.0  # container_pause: how long the container stays frozen (seconds, not steps: a frozen worker stops all steps)
 
 
 @dataclass
@@ -88,18 +105,26 @@ class Config:
         compute_kinds = ("compute", "two", "intermittent", "spike")
         checks = [
             (cluster.world_size >= 2, "cluster.world_size must be at least 2"),
-            (cluster.backend in ("gloo", "pipes"), "cluster.backend must be gloo or pipes"),
+            (cluster.backend in ("gloo", "pipes", "docker"), "cluster.backend must be gloo, pipes or docker"),
+            (cluster.container_cpus > 0, "cluster.container_cpus must be positive"),
             (0 <= cluster.master_port <= 65535, "cluster.master_port must be between 0 and 65535"),
             (train.steps >= 1, "train.steps must be at least 1"),
             (train.batch_size >= 1, "train.batch_size must be at least 1"),
             (train.learning_rate > 0, "train.learning_rate must be positive"),
             (train.dataset in ("mnist", "synthetic"), "train.dataset must be mnist or synthetic"),
-            (fault.kind in ("none", "compute", "two", "intermittent", "spike", "link"), "unknown fault.kind"),
+            (fault.kind in ("none", "compute", "two", "intermittent", "spike", "link") + CONTAINER_FAULT_KINDS,
+             "unknown fault.kind"),
+            (fault.kind not in CONTAINER_FAULT_KINDS or cluster.backend == "docker",
+             "container fault kinds need cluster.backend docker"),
+            (fault.fault_tool in ("docker", "pumba"), "fault.fault_tool must be docker or pumba"),
+            (fault.network_delay_ms >= 0, "fault.network_delay_ms must be 0 or more"),
+            (fault.stress_workers >= 1, "fault.stress_workers must be at least 1"),
+            (fault.pause_seconds > 0, "fault.pause_seconds must be positive"),
             (fault.kind == "none" or len(fault.workers) > 0, "fault.workers is required when fault.kind is not none"),
             (all(0 <= worker < cluster.world_size for worker in fault.workers),
              "every fault.workers entry must be between 0 and world_size - 1"),
             (fault.kind != "two" or len(set(fault.workers)) == 2, "fault.kind two needs exactly two distinct fault.workers"),
-            (fault.kind not in compute_kinds or fault.multiplier >= 1.0, "fault.multiplier must be at least 1.0"),
+            (fault.kind not in compute_kinds + ("container_cpu",) or fault.multiplier >= 1.0, "fault.multiplier must be at least 1.0"),
             (fault.start_step >= 0, "fault.start_step must be 0 or more"),
             (fault.duration >= 0, "fault.duration must be 0 or more"),
             (fault.kind != "spike" or fault.duration >= 1, "a spike needs fault.duration of at least 1"),

@@ -10,7 +10,7 @@ from torch import multiprocessing as torch_multiprocessing
 
 from swim_straggler.telemetry.events import merge_event_files
 from swim_straggler.train.data import prepare_dataset
-from swim_straggler.train.worker import train_one_rank
+from swim_straggler.train.worker import create_detector, train_one_rank
 from swim_straggler.transport.gloo import GlooTransport
 from swim_straggler.transport.pipes import run_ranks_in_threads
 
@@ -40,6 +40,7 @@ def gloo_worker_entry(rank, config, dataset_source, run_directory_text, master_p
 
 def run_training(config, run_directory=None):
     """Train with all workers and return where the merged event log was written."""
+    create_detector(config, rank=0, world_size=config.cluster.world_size)  # fail early on an unusable detector mode
     dataset_source = prepare_dataset(config.train)
 
     if run_directory is None:
@@ -47,6 +48,11 @@ def run_training(config, run_directory=None):
         run_directory = Path(config.run_directory) / f"{config.name}_{time_text}"
     run_directory = Path(run_directory)
     run_directory.mkdir(parents=True, exist_ok=True)
+
+    if config.cluster.backend == "docker":
+        from swim_straggler.containers.runner import run_in_containers
+
+        return run_in_containers(config, run_directory)
 
     world_size = config.cluster.world_size
     if config.cluster.backend == "gloo":

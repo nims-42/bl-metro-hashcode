@@ -17,6 +17,8 @@ from torch.nn import functional
 
 from swim_straggler.allreduce.header import Header, HeaderCodec
 from swim_straggler.allreduce.ring import ring_allreduce
+from swim_straggler.config import ConfigError
+from swim_straggler.detector.swim import StragglerDetector
 from swim_straggler.faults.inject import FaultInjector, SlowLinkTransport
 from swim_straggler.telemetry.events import EventLogger
 from swim_straggler.train.data import BatchProvider, load_rank_shard
@@ -36,6 +38,16 @@ def create_model_with_seed(seed):
     with MODEL_CREATION_LOCK:
         torch.manual_seed(seed)
         return SmallConvolutionalNetwork()
+
+
+def create_detector(config, rank, world_size):
+    """The straggler detector of this worker, or None when detection is switched off."""
+    mode = config.detector.mode
+    if mode == "off":
+        return None
+    if mode == "swim":
+        return StragglerDetector(rank, world_size, config.detector, seed=config.train.seed)
+    raise ConfigError(f"detector.mode '{mode}' is not implemented yet (the baselines arrive in milestone 6)")
 
 
 def flatten_gradients_with_loss(model, loss):
@@ -75,7 +87,8 @@ def train_one_rank(transport, config, dataset_source, run_directory):
 
     fault_injector = FaultInjector(config.fault, rank)
     transport = SlowLinkTransport(transport, fault_injector)
-    codec = HeaderCodec()
+    detector = create_detector(config, rank, world_size)
+    codec = HeaderCodec(gossip_length=detector.gossip_length if detector else 0)
 
     if rank == 0:
         logger.log("run_start", config=config.to_dict(), dataset_source=dataset_source, world_size=world_size)
@@ -102,17 +115,32 @@ def train_one_rank(transport, config, dataset_source, run_directory):
             logger.log("fault_started", step=step, fault_kind=config.fault.kind)
             fault_start_logged = True
 
-        # 2. all-reduce
+        # 2. all-reduce (the detector rides along: its gossip travels in the header of every message)
         def build_header():
-            return Header(sender=rank, step=step, compute_time=compute_seconds, wait_time=previous_wait_seconds)
+            gossip = tuple(detector.make_gossip()) if detector else ()
+            return Header(sender=rank, step=step, compute_time=compute_seconds,
+                          wait_time=previous_wait_seconds, gossip=gossip)
+
+        def absorb_header(received_header, round_number):
+            detector.receive_gossip(received_header.gossip)
+
+        if detector:
+            detector.start_step(step, compute_seconds)
 
         transport.current_step = step
         vector = flatten_gradients_with_loss(model, loss)
         allreduce_start_time = time.perf_counter()
-        wait_seconds_per_round = ring_allreduce(transport, vector, codec, make_header=build_header)
+        wait_seconds_per_round = ring_allreduce(
+            transport, vector, codec, make_header=build_header,
+            on_header_received=absorb_header if detector else None,
+        )
         allreduce_seconds = time.perf_counter() - allreduce_start_time
         wait_seconds = sum(wait_seconds_per_round)
         previous_wait_seconds = wait_seconds
+
+        if detector:
+            for detector_event in detector.finish_step(step, wait_seconds_per_round):
+                logger.log("detector", **detector_event)
 
         # 3. update
         average_loss = write_averaged_gradients_back(model, vector, world_size)
@@ -124,6 +152,7 @@ def train_one_rank(transport, config, dataset_source, run_directory):
             loss=average_loss,
             compute_seconds=compute_seconds,
             wait_seconds=wait_seconds,
+            wait_seconds_per_round=wait_seconds_per_round,
             allreduce_seconds=allreduce_seconds,
             step_seconds=time.perf_counter() - step_start_time,
             fault_active=fault_is_active,
@@ -133,6 +162,7 @@ def train_one_rank(transport, config, dataset_source, run_directory):
     logger.log(
         "run_end",
         parameter_checksum=parameter_checksum(model),
+        believed_stragglers=detector.straggler_ranks() if detector else [],
         seconds_since_start=time.perf_counter() - run_start_time,
     )
     logger.close()

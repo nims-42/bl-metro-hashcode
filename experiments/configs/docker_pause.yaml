@@ -1,0 +1,8 @@
+# Worker 2's container is frozen (docker pause) at step 50 and unfrozen 2 seconds later.
+# This is a stall, not a slowdown: all other workers block waiting for it. Use it to see what a stall does
+# to the logs; it is not a detection benchmark.
+name: docker_pause
+cluster: {world_size: 4, backend: docker, container_cpus: 1.0}
+train: {steps: 100, batch_size: 64, dataset: mnist}
+fault: {kind: container_pause, workers: [2], start_step: 50, pause_seconds: 2.0}
+detector: {mode: swim, k_probes: 2}

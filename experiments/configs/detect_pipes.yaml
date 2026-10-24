@@ -1,0 +1,6 @@
+# Used by tests and quick checks: threads instead of processes, synthetic data.
+name: detect_pipes
+cluster: {world_size: 4, backend: pipes}
+train: {steps: 80, batch_size: 32, dataset: synthetic}
+fault: {kind: compute, workers: [2], multiplier: 4.0, start_step: 30}
+detector: {mode: swim, warmup_steps: 10, k_probes: 2}

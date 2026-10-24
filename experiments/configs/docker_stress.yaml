@@ -1,0 +1,6 @@
+# A processor-hungry program (stress-ng) is started next to worker 2 inside its container at step 50.
+name: docker_stress
+cluster: {world_size: 4, backend: docker, container_cpus: 1.0}
+train: {steps: 150, batch_size: 64, dataset: mnist}
+fault: {kind: container_stress, workers: [2], start_step: 50}
+detector: {mode: swim, k_probes: 2}
