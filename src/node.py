@@ -72,6 +72,9 @@ class Config:
     port_stride: int = 0           # >0 gives each node its own ports (all on one host)
     connect_timeout: float = 60.0
 
+    # Console output (the JSONL log is unaffected)
+    log_every: int = 25            # status line every N steps; 0: events only
+
     # Fault injection (section 8)
     fault_node: str = ""           # node ids this fault applies to, e.g. "2" or "gpu2,gpu3"
     fault_type: str = ""           # compute | network
@@ -385,6 +388,54 @@ def build_swim(cfg, metrics, request_fn=None, rng=None, spawn=None, clock=time.m
                 spawn=spawn, clock=clock)
 
 
+# Events worth a console line; the rest stay in the JSONL log only.
+CONSOLE_EVENTS = ("FAULT_START", "FAULT_END", "SUSPECT_RAISED", "PING_REQ_RESULT", "SUSPECT",
+                  "SUSPECTED_SELF", "SUSPICION_DROPPED", "JITTER_IGNORED", "ACCUSATION_HELD",
+                  "REFUTE", "ALIVE", "CONFIRM")
+
+
+def say(line):
+    """Best-effort console line: a closed or broken stdout must never stop a node."""
+    try:
+        print(line, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
+def describe(event):
+    """One readable phrase for a metrics event."""
+    kind, about, cls, src = event["type"], event["about"], event.get("class"), event.get("from")
+    text = f"{kind} {about}" + (f" ({cls})" if cls else "")
+    if kind == "PING_REQ_RESULT":
+        text += (f": agree {event['agree']}, disagree {event['disagree']}, "
+                 f"nack {event['nack']}, missing {event['missing']}")
+    elif kind == "SUSPECT_RAISED":
+        text += f", asking {', '.join(event.get('peers', []))}"
+    elif kind in ("FAULT_START", "FAULT_END"):
+        text += f", {event.get('delay_ms', 0):g} ms"
+    elif src and src != about:
+        text += f" from {src}"
+    return text
+
+
+def log_step(cfg, record):
+    """Console lines for one step, each prefixed with this node's name so the
+    output of N nodes sharing one terminal can be told apart."""
+    prefix = f"[{cfg.name}] step {record['step']:4d} |"
+    step = record["step"]
+    if cfg.log_every and step % cfg.log_every == 0:
+        flagged = ", ".join(f"{m} {v['state']}" + (f" ({v['class']})" if v["class"] else "")
+                            for m, v in record["member_states"].items()
+                            if v["state"] not in ("Alive", "Left"))
+        say(f"{prefix} compute {record['compute_t'] * 1000:6.1f} ms  "
+            f"wait {record['wait_t'] * 1000:6.1f} ms  "
+            f"pred_lag {record['pred_lag'] * 1000:6.1f} ms  LHM {record['lhm']}"
+            + (f" | {flagged}" if flagged else ""))
+    for event in record["events"]:
+        if event["type"] in CONSOLE_EVENTS:
+            say(f"{prefix} {describe(event)}")
+
+
 def run(cfg):
     cfg.validate()
     rng = np.random.default_rng(cfg.seed * 1000 + cfg.node_id)
@@ -400,6 +451,10 @@ def run(cfg):
     ring = TcpRing(cfg)
     ring.connect()
     trainer = Trainer(cfg, rng)
+    planned = (f", fault {cfg.fault_type} {cfg.fault_delay_ms:g} ms from step "
+               f"{cfg.fault_start_step}" if cfg.fault_at(cfg.fault_start_step) else "")
+    say(f"[{cfg.name}] ring up: pred {swim.pred}, succ {swim.succ}, compute "
+        f"{cfg.compute_ms:g} ms ({cfg.compute_mode}){planned}")
     clock = time.monotonic
     prev_wait = 0.0
     prev_last_wait = 0.0
@@ -443,9 +498,10 @@ def run(cfg):
 
             swim.end_step(step, compute_t, wait_t, pred_lag, step_t)
             states, lhm = swim.snapshot()
-            metrics.write_step(step, compute_t, wait_t, pred_lag, step_t, lhm, states,
-                               fault=fault, late_streak=swim.late_streak,
-                               chunk_lags=[round(x, 6) for x in lags])
+            record = metrics.write_step(step, compute_t, wait_t, pred_lag, step_t, lhm, states,
+                                        fault=fault, late_streak=swim.late_streak,
+                                        chunk_lags=[round(x, 6) for x in lags])
+            log_step(cfg, record)
             prev_wait, prev_last_wait = wait_t, lags[-1]
         ring.flush()
     finally:
