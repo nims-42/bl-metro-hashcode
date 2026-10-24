@@ -82,8 +82,11 @@ def node_env(scenario, i, n, run_id, steps, overrides):
 def run_local(scenario, n, run_id, steps, overrides, timeout):
     procs = []
     for i in range(n):
+        # CPU limits only exist under Docker, and N busy processes sharing one
+        # desktop add noise, so local nodes sleep through their compute.
         env = dict(os.environ, RESULTS_DIR=RESULTS, HOST_TEMPLATE="127.0.0.1",
                    PORT_STRIDE="10", RING_PORT="17000", PING_PORT="17001",
+                   COMPUTE_MODE="sleep",
                    **node_env(scenario, i, n, run_id, steps, overrides))
         procs.append(subprocess.Popen([sys.executable, "-m", "src.node"], cwd=REPO, env=env))
     deadline = time.monotonic() + timeout
@@ -144,7 +147,8 @@ def apply_cpu_limit(run_id, fault, ground_truth):
     for container in client.containers.list(filters={
             "label": [f"com.docker.compose.project={project}",
                       f"com.docker.compose.service={service}"]}):
-        container.update(nano_cpus=int(fault["cpus"] * 1e9))
+        # Same CFS quota that `docker update --cpus <x>` sets.
+        container.update(cpu_period=100_000, cpu_quota=int(fault["cpus"] * 100_000))
     fault["start_ts"] = time.time()
     ground_truth["faults_applied"].append(dict(fault))
 

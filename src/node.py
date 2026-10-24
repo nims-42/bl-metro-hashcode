@@ -45,6 +45,7 @@ class Config:
     batch: int = 8
     lr: float = 0.01
     compute_ms: float = 100.0      # simulated GPU time per step [OUR CHOICE]
+    compute_mode: str = "work"     # work: calibrated CPU work (a CPU limit slows it); sleep
     jitter_ms: float = 0.0         # uniform random extra compute on every node
 
     # Detection (section 7)
@@ -105,6 +106,8 @@ class Config:
             raise ValueError(f"NODE_ID {self.node_id} outside 0..{self.n - 1}")
         if not 1 <= self.k <= self.n - 2:
             raise ValueError(f"k must satisfy 1 <= k <= N-2, got k={self.k}, N={self.n}")
+        if self.compute_mode not in ("work", "sleep"):
+            raise ValueError(f"COMPUTE_MODE must be work or sleep, got {self.compute_mode!r}")
         if self.fault_type not in ("", COMPUTE_FAULT, NETWORK_FAULT):
             raise ValueError(f"FAULT_TYPE must be compute or network, got {self.fault_type!r}")
         return self
@@ -189,13 +192,46 @@ def ring_allreduce(vec, n, idx, send, recv, on_header=None, clock=time.monotonic
 
 
 class Trainer:
-    """NumPy stand-in for a training step: linear regression on a local shard."""
+    """NumPy stand-in for a training step: linear regression on a local shard.
+
+    With compute_mode "work" the simulated GPU time is a fixed amount of CPU
+    work per step, calibrated at startup to take about compute_ms, so a CPU
+    limit (`docker update --cpus`) stretches it the way a throttled GPU
+    would. "sleep" just sleeps, which is quieter when many nodes share one
+    machine outside Docker.
+    """
+
+    _BURN_SIZE = 4096
 
     def __init__(self, cfg, rng):
         self.x = rng.standard_normal((cfg.batch, cfg.grad_dim))
         self.y = rng.standard_normal(cfg.batch)
         self.w = np.zeros(cfg.grad_dim)
         self.lr = cfg.lr
+        self._scratch = np.ones(self._BURN_SIZE)
+        self.mode = cfg.compute_mode
+        self.work_per_s = self._calibrate() if self.mode == "work" else 0.0
+
+    def _calibrate(self, bursts=20, iterations=256):
+        """Fastest of several short bursts: the uncontended work rate, which is
+        stable across nodes even when they all calibrate at once."""
+        best = 0.0
+        for _ in range(bursts):
+            t0 = time.perf_counter()
+            self._burn(iterations)
+            best = max(best, iterations / (time.perf_counter() - t0))
+        return best
+
+    def _burn(self, iterations):
+        for _ in range(iterations):
+            np.sin(self._scratch, out=self._scratch)
+
+    def simulate(self, seconds):
+        """Spend `seconds` of simulated GPU time."""
+        if self.mode == "sleep":
+            time.sleep(seconds)
+        else:
+            self._burn(int(seconds * self.work_per_s))
 
     def gradient(self):
         return self.x.T @ (self.x @ self.w - self.y) / len(self.y)
@@ -383,7 +419,7 @@ def run(cfg):
             step_start = clock()
             grad = trainer.gradient()
             simulated = cfg.compute_ms + jitter_rng.uniform(0, cfg.jitter_ms)
-            time.sleep(simulated / 1000.0)
+            trainer.simulate(simulated / 1000.0)
             if fault == COMPUTE_FAULT:
                 time.sleep(delay)
             compute_t = clock() - step_start
