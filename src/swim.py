@@ -236,13 +236,24 @@ class Swim:
         if u["incarnation"] < me.incarnation:
             return
         if self.lifeguard.should_refute(self._self_outlier(), me.state):
-            new_inc = self.membership.refute(u["incarnation"])
-            self.lifeguard.health.refuted_self()
-            self.gossip.add(msg.gossip_update(msg.ALIVE, self.self_id, new_inc, self.self_id))
-            self.metrics.event("REFUTE", self.self_id, from_=u["from"], incarnation=new_inc)
+            self._refute(u["incarnation"], u["from"])
         elif self.membership.apply(u):
             self.gossip.add(u)
             self.metrics.event("SUSPECTED_SELF", self.self_id, u.get("class"), u["from"])
+
+    def _refute(self, seen_incarnation, accuser):
+        new_inc = self.membership.refute(seen_incarnation)
+        self.lifeguard.health.refuted_self()
+        self.gossip.add(msg.gossip_update(msg.ALIVE, self.self_id, new_inc, self.self_id))
+        self.metrics.event("REFUTE", self.self_id, from_=accuser, incarnation=new_inc)
+
+    def _recheck_self(self):
+        """While suspected, keep checking: once the ring view has not
+        implicated this node for N_consec steps, refute before the suspicion
+        times out (SWIM's suspect that answers again in time)."""
+        me = self.membership.get(self.self_id)
+        if me.state == mb.SUSPECT and self._self_clear():
+            self._refute(me.incarnation, None)
 
     # --- end of a training step: direct probe ----------------------------------
     def end_step(self, step, compute_t, wait_t, pred_lag, step_t):
@@ -253,6 +264,7 @@ class Swim:
             if not self.enabled:
                 return
             self._check_suspicions()
+            self._recheck_self()
             if step < self.cfg.warmup_steps:
                 return
             if self.is_pred_late(pred_lag):
@@ -451,6 +463,15 @@ class Swim:
         votes = sum(self.lifeguard.is_self_outlier(s, self.self_id, self.succ, floor)
                     for s in recent)
         return votes * 2 > len(recent)
+
+    def _self_clear(self):
+        """True when each of the last N_consec covered steps clears this node."""
+        recent = self._recent_stats(self.cfg.n_consec)
+        if len(recent) < self.cfg.n_consec:
+            return False
+        floor = self._floor()
+        return not any(self.lifeguard.is_self_outlier(s, self.self_id, self.succ, floor)
+                       for s in recent)
 
     def snapshot(self):
         with self._lock:

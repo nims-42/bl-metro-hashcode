@@ -285,6 +285,23 @@ def test_slow_node_accepts_suspicion_about_itself():
     assert events(metrics, "SUSPECTED_SELF")
 
 
+def test_suspected_node_refutes_once_it_recovers():
+    swim, metrics, _ = make_swim(me=2)
+    for s in range(5):
+        feed(swim, s, compute={"gpu2": 0.25}, wait={"gpu2": 0.0}, lag={"gpu3": 0.15})
+    header = msg.make_header("gpu1", 5, msg.RS, 0, 0.0, 0.1, 0.0, [],
+                             [msg.gossip_update(msg.SUSPECT, "gpu2", 0, "gpu3")], 5, 6)
+    swim.on_header(header)
+    assert swim.membership.state("gpu2") == SUSPECT
+    feed(swim, 5)
+    feed(swim, 6)
+    assert swim.membership.state("gpu2") == SUSPECT      # not yet N_consec clean steps
+    feed(swim, 7)
+    assert swim.membership.state("gpu2") == ALIVE
+    assert swim.membership.incarnation == 1
+    assert events(metrics, "REFUTE")
+
+
 def test_independent_suspicions_count_as_confirmations():
     swim, _, _ = make_swim(me=0)
     first = msg.gossip_update(msg.SUSPECT, "gpu2", 0, "gpu3")
