@@ -58,17 +58,24 @@ Tick a box when the task is done and committed.
 - [x] `compose.yaml`: gpu0…gpu4 on `ring-net`, shared `x-node` anchor, `./results` → `/results`
 
 ## 9. Experiments: `experiments/run_experiments.py` (§3.4, §8, §9)
-- [ ] Scenarios: no fault, compute fault, network fault, jitter only, slow accuser
-- [ ] Generated per-run compose file for any N; `docker update --cpus` fault
-- [ ] Ground truth to `results/<run_id>/ground_truth.json`
-- [ ] Summary: detection latency (steps, seconds, full dissemination), FP / FP-, classification accuracy, extra messages
-- [ ] Overhead: step time with detection on vs off
-- [ ] `summary.json` / `summary.csv`
+- [x] Scenarios: no fault, compute fault, network fault, jitter only, slow accuser
+- [x] Generated per-run compose file for any N; `docker update --cpus` fault (written, **not yet run: no Docker on the dev machine**)
+- [x] Ground truth to `results/<run_id>/ground_truth.json`
+- [x] Summary: detection latency (steps, seconds, full dissemination), FP / FP-, classification accuracy, extra messages
+- [x] Overhead: step time with detection on vs off
+- [x] `summary.json` / `summary.csv`
 
 ## 10. Docs and verification
-- [ ] `README.md`: build, run a scenario, read the results
-- [ ] All tests pass at several values of N
-- [ ] End-to-end run of every scenario at N = 5
+- [x] `README.md`: build, run a scenario, read the results
+- [x] All tests pass at several values of N
+- [x] End-to-end run of every scenario at N = 5 (`--local` processes; N = 8 checked too)
+- [ ] End-to-end run under Docker Compose, including `cpu_limit`
+
+## Open findings from the first runs
+- [ ] `slow_accuser`: when the straggler's successor is also slow, the self-check correctly holds its accusation, but then nobody else observes the original straggler directly, so it goes undetected (its slow successor is still caught). Decide whether a peer may raise a suspicion from telemetry alone.
+- [ ] Detection takes ~8 s at N = 5 with α = 5, β = 6 (suspicion timeout). Try α = β = 2 and re-measure false positives under jitter.
+- [ ] A confirmed straggler stays `Failed` after its fault ends (CONFIRM is final in SWIM). Decide on recovery once mitigation is in scope.
+- [ ] Reconcile with the `nims/skeleton` branch, which uses a different layout (`swim_straggler/`).
 
 ## Later (out of scope for now, §0 rule 6)
 - [ ] Dashboard: `wait_t` per GPU per step, detected node and class, time to detect, FP vs ground truth
