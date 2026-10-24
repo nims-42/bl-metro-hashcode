@@ -1,4 +1,7 @@
-"""Pipe transport: ranks are threads in one process. Used for tests; gloo comes in Milestone 2."""
+"""Pipe transport: every rank is a thread in one process.
+
+Used by the tests and as a fallback when torch.distributed is not wanted.
+"""
 
 import queue
 import threading
@@ -8,53 +11,72 @@ import torch
 
 from swim_straggler.transport.base import Transport
 
+BYTES_PER_FLOAT32 = 4
+
 
 class PipeTransport(Transport):
-    def __init__(self, rank, world_size, recv_conn, send_conn):
-        self.rank, self.world_size = rank, world_size
-        self._recv, self._send = recv_conn, send_conn
-        self._outbox = queue.Queue()
-        # Sending happens on a helper thread so a full pipe can never deadlock the ring.
-        threading.Thread(target=self._send_loop, daemon=True).start()
+    def __init__(self, rank, world_size, receive_connection, send_connection):
+        self.rank = rank
+        self.world_size = world_size
+        self._receive_connection = receive_connection
+        self._send_connection = send_connection
+        self._outgoing_messages = queue.Queue()
+        # A helper thread does the actual sending, so a full pipe can never block the ring.
+        sender_thread = threading.Thread(target=self._send_forever, daemon=True)
+        sender_thread.start()
 
-    def _send_loop(self):
+    def _send_forever(self):
         while True:
-            self._send.send_bytes(self._outbox.get())
-            self._outbox.task_done()
+            message_bytes = self._outgoing_messages.get()
+            self._send_connection.send_bytes(message_bytes)
+            self._outgoing_messages.task_done()
 
-    def send_next(self, payload):
-        self._outbox.put(payload.numpy().tobytes())  # tobytes copies, so later edits are safe
+    def send_to_next(self, payload):
+        # tobytes() copies the data, so the caller may modify the tensor straight away.
+        self._outgoing_messages.put(payload.detach().numpy().tobytes())
 
-    def recv_prev(self, numel):
-        data = self._recv.recv_bytes()
-        assert len(data) == numel * 4, f"expected {numel * 4} bytes, got {len(data)}"
-        return torch.frombuffer(bytearray(data), dtype=torch.float32)
+    def receive_from_previous(self, number_of_elements):
+        message_bytes = self._receive_connection.recv_bytes()
+        expected_bytes = number_of_elements * BYTES_PER_FLOAT32
+        if len(message_bytes) != expected_bytes:
+            raise RuntimeError(f"rank {self.rank}: expected {expected_bytes} bytes, received {len(message_bytes)}")
+        return torch.frombuffer(bytearray(message_bytes), dtype=torch.float32)
 
     def flush(self):
-        self._outbox.join()
+        self._outgoing_messages.join()
 
 
-def run_ranks(world_size, fn, timeout=30.0):
-    """Run `fn(transport)` on every rank (one thread each); return the results in rank order."""
-    pipes = [Pipe(duplex=False) for _ in range(world_size)]  # pipes[i] carries rank i -> i+1
-    transports = [
-        PipeTransport(r, world_size, pipes[(r - 1) % world_size][0], pipes[r][1]) for r in range(world_size)
-    ]
-    results, errors = [None] * world_size, []
+def run_ranks_in_threads(world_size, rank_function, timeout_seconds=60.0):
+    """Run rank_function(transport) once per rank, each in its own thread.
 
-    def work(r):
+    Returns the results in rank order. Raises if any rank fails or if the ranks do not
+    finish within the timeout (which usually means a deadlock).
+    """
+    # pipes[i] carries messages from rank i to rank i + 1.
+    pipes = [Pipe(duplex=False) for _ in range(world_size)]
+    transports = []
+    for rank in range(world_size):
+        receive_connection = pipes[(rank - 1) % world_size][0]
+        send_connection = pipes[rank][1]
+        transports.append(PipeTransport(rank, world_size, receive_connection, send_connection))
+
+    results = [None] * world_size
+    error_messages = []
+
+    def run_one_rank(rank):
         try:
-            results[r] = fn(transports[r])
-        except Exception as exc:  # noqa: BLE001
-            errors.append(f"rank {r}: {exc!r}")
+            results[rank] = rank_function(transports[rank])
+        except Exception as error:
+            error_messages.append(f"rank {rank}: {error!r}")
 
-    threads = [threading.Thread(target=work, args=(r,), daemon=True) for r in range(world_size)]
-    for t in threads:
-        t.start()
-    for t in threads:
-        t.join(timeout)
-    if errors:
-        raise RuntimeError("; ".join(errors))
-    if any(t.is_alive() for t in threads):
-        raise TimeoutError("ranks did not finish (deadlock?)")
+    threads = [threading.Thread(target=run_one_rank, args=(rank,), daemon=True) for rank in range(world_size)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout_seconds)
+
+    if error_messages:
+        raise RuntimeError("; ".join(error_messages))
+    if any(thread.is_alive() for thread in threads):
+        raise TimeoutError("the ranks did not finish in time (deadlock?)")
     return results

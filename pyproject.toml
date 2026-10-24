@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "swim-straggler"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["torch", "pyyaml"]
+dependencies = ["torch", "numpy", "pyyaml"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
@@ -16,3 +16,6 @@ swim-straggler = "swim_straggler.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["swim_straggler*"]
+
+[tool.pytest.ini_options]
+markers = ["slow: starts several processes; skip with -m 'not slow'"]

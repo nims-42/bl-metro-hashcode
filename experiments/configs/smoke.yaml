@@ -1,0 +1,6 @@
+# Quick check that training works: 4 workers, synthetic data, no fault. Takes a few seconds.
+name: smoke
+cluster: {world_size: 4, backend: gloo}
+train: {steps: 40, batch_size: 32, learning_rate: 0.05, seed: 0, dataset: synthetic}
+fault: {kind: none}
+detector: {mode: off}

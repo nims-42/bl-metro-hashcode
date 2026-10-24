@@ -1,0 +1,6 @@
+# Quick fault check: 4 workers, synthetic data, worker 2 computes 4x slower from step 20.
+name: fault_demo
+cluster: {world_size: 4, backend: gloo}
+train: {steps: 60, batch_size: 32, learning_rate: 0.05, seed: 0, dataset: synthetic}
+fault: {kind: compute, workers: [2], multiplier: 4.0, start_step: 20, duration: 0}
+detector: {mode: off}
