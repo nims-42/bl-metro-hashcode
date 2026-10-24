@@ -1,0 +1,8 @@
+# EXPERIMENTAL: a slow link without Docker. Every message worker 2 sends is delayed by 4 ms from step 50.
+# Expected: no worker is confirmed (nobody computes slowly), and with diagnose_network some worker may say
+# "the delay is not compute". The signal is weak: see docs/experimental.md.
+name: link_demo
+cluster: {world_size: 4, backend: gloo}
+train: {steps: 200, dataset: synthetic}
+fault: {kind: link, workers: [2], link_delay_seconds: 0.004, start_step: 50}
+detector: {mode: swim, k_probes: 2, diagnose_network: true}

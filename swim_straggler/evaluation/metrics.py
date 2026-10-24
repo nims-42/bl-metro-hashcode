@@ -31,6 +31,7 @@ def run_metrics(events):
         "mean_step_ms": training["mean_step_seconds"] * 1000,
         "loss_at_end": training["loss_at_end"],
         "steps": training["steps"],
+        "simulated": any(event.get("simulated") for event in events if event["event"] == "run_start"),
     }
 
 
@@ -62,12 +63,12 @@ def summarize_group(rows):
 
 
 def summarize_sweep(rows):
-    """One summary per (detector, fault) pair, in the order they first appear."""
+    """One summary per (detector, fault, number of workers), in the order they first appear."""
     groups = {}
     for row in rows:
-        groups.setdefault((row["detector"], row["fault"]), []).append(row)
-    return [{"detector": detector, "fault": fault, **summarize_group(group_rows)}
-            for (detector, fault), group_rows in groups.items()]
+        groups.setdefault((row["detector"], row["fault"], row["workers"]), []).append(row)
+    return [{"detector": detector, "fault": fault, "workers": workers, **summarize_group(group_rows)}
+            for (detector, fault, workers), group_rows in groups.items()]
 
 
 def step_time_overhead(summaries, baseline_detector="off", fault="healthy"):

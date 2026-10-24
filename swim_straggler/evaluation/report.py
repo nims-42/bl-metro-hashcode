@@ -40,8 +40,10 @@ def results_markdown(results_directory):
     sample = rows[0]
     repeats = max(row["repeat"] for row in rows) + 1
 
+    simulated_note = ("**SIMULATION**: timings from the simulator's random model, not measured (docs/simulation.md). "
+                      if sample.get("simulated") else "")
     parts = [
-        f"Measured on {machine['date']}: {sample['workers']} workers, backend `{sample['backend']}`, "
+        simulated_note + f"{'Simulated' if sample.get('simulated') else 'Measured'} on {machine['date']}: {sample['workers']} workers, backend `{sample['backend']}`, "
         f"{machine['processors']} processors, {machine['platform']}, Python {machine['python']}, torch {machine['torch']}. "
         f"Up to {repeats} repeats per cell (seed changes per repeat; every detector sees the same seeds). "
         f"Sweep definition: `{results_directory.as_posix()}/sweep.yaml`; every run: `{results_directory.as_posix()}/runs.jsonl`.",
@@ -94,6 +96,10 @@ def write_results(results_directory):
 
     results_directory = Path(results_directory)
     rows = read_finished_rows(results_directory / "runs.jsonl")
+    if len({row["workers"] for row in rows}) > 1:  # a sweep over group sizes (the simulator sweeps)
+        from swim_straggler.evaluation.scaling import write_scaling_results
+
+        return write_scaling_results(results_directory, rows)
     summaries = summarize_sweep(rows)
     (results_directory / "summary.json").write_text(json.dumps(summaries, indent=2), encoding="utf-8")
     if rows:

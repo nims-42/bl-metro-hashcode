@@ -52,14 +52,14 @@ def summarize_training(events, steps_to_average=5):
     """Loss at the start and end of training, and the mean step time, from the step events."""
     step_events = [event for event in events if event["event"] == "step"]
     rank_zero_events = sorted((event for event in step_events if event["rank"] == 0), key=lambda event: event["step"])
-    losses = [event["loss"] for event in rank_zero_events]
+    losses = [event["loss"] for event in rank_zero_events if event.get("loss") is not None]  # none in simulated runs
     first_losses = losses[:steps_to_average]
     last_losses = losses[-steps_to_average:]
     step_seconds = [event["step_seconds"] for event in step_events]
     return {
         "steps": len(rank_zero_events),
-        "loss_at_start": sum(first_losses) / len(first_losses),
-        "loss_at_end": sum(last_losses) / len(last_losses),
+        "loss_at_start": sum(first_losses) / len(first_losses) if losses else None,
+        "loss_at_end": sum(last_losses) / len(last_losses) if losses else None,
         "mean_step_seconds": sum(step_seconds) / len(step_seconds),
     }
 
@@ -122,6 +122,9 @@ def summarize_detection(events):
                                        if event["action"] == "confirmed" and is_wrong(event)}),
         "rejected_suspicions": len([event for event in detector_events if event["action"] == "rejected"]),
         "cleared_events": len([event for event in detector_events if event["action"] == "cleared"]),
+        # EXPERIMENTAL: workers that said "the delay is not compute" (detector.diagnose_network), with the first step
+        "network_diagnoses": sorted({event["rank"]: event["step"] for event in reversed(detector_events)
+                                     if event["action"] == "delay_not_compute"}.items()),
     }
     for culprit in sorted(faulty_ranks):
         first_confirmed = first_step(("confirmed",), culprit)

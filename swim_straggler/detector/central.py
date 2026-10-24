@@ -10,7 +10,7 @@ worker's compute time exactly. This is the same information a real report messag
 would carry; only worker 0 looks at it.
 """
 
-from swim_straggler.detector.base import Detector, StreakJudge, median_or_none, smooth
+from swim_straggler.detector.base import Detector, StreakJudge, median_or_none, smooth, trace_event
 from swim_straggler.detector.table import ALIVE
 
 MONITOR_RANK = 0
@@ -26,6 +26,7 @@ class CentralMonitor(Detector):
         self.is_monitor = rank == MONITOR_RANK
         self.smoothed_compute = [None] * world_size
         self.judge = StreakJudge(world_size, config.consecutive_steps, config.recovery_steps)
+        self.trace = getattr(config, "trace", False)
 
     def finish_step(self, step, wait_seconds_per_round, compute_seconds_of_every_worker=None):
         if not self.is_monitor:
@@ -39,10 +40,24 @@ class CentralMonitor(Detector):
         for worker in range(self.world_size):
             reference = self.reference_compute(worker)
             looks_slow = reference is not None and self.smoothed_compute[worker] > self.config.factor * reference
+            streak_before = self.judge.slow_streak[worker]
+            was_alive = self.judge.states[worker] == ALIVE
             decision = self.judge.judge(worker, looks_slow, step)
+            if self.trace and was_alive:  # trace the counting only until a decision is made
+                events += self.trace_events(worker, step, looks_slow, streak_before, reference)
             if decision:
                 events.append({"action": decision, "subject": worker, "step": step, "decided_by": "central monitor"})
         return events
+
+    def trace_events(self, worker, step, looks_slow, streak_before, reference):
+        """Why the monitor is counting (or stopped counting) a worker as slow."""
+        if looks_slow:
+            return [trace_event("looks_slow", worker, step, compute_ms=round(self.smoothed_compute[worker] * 1000, 2),
+                                typical_compute_ms=round(reference * 1000, 2), factor=self.config.factor,
+                                streak=self.judge.slow_streak[worker], needed=self.config.consecutive_steps)]
+        if streak_before > 0:
+            return [trace_event("looks_normal_again", worker, step, after_steps=streak_before)]
+        return []
 
     def reference_compute(self, worker):
         """Median smoothed compute time of the other workers that are not already confirmed slow."""

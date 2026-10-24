@@ -9,6 +9,7 @@ import torch
 from torch import multiprocessing as torch_multiprocessing
 
 from swim_straggler.telemetry.events import merge_event_files
+from swim_straggler.telemetry.trace import write_trace
 from swim_straggler.train.data import prepare_dataset
 from swim_straggler.train.worker import create_detector, train_one_rank
 from swim_straggler.transport.gloo import GlooTransport
@@ -39,20 +40,29 @@ def gloo_worker_entry(rank, config, dataset_source, run_directory_text, master_p
 
 
 def run_training(config, run_directory=None):
-    """Train with all workers and return where the merged event log was written."""
+    """Train with all workers and return where the merged event log was written (trace.log is written next to it)."""
     create_detector(config, rank=0, world_size=config.cluster.world_size)  # fail early on an unusable detector mode
-    dataset_source = prepare_dataset(config.train)
-
     if run_directory is None:
         time_text = time.strftime("%Y%m%d_%H%M%S")
         run_directory = Path(config.run_directory) / f"{config.name}_{time_text}"
     run_directory = Path(run_directory)
     run_directory.mkdir(parents=True, exist_ok=True)
 
+    if config.cluster.backend == "simulated":  # no training at all; see simulation/simulator.py
+        from swim_straggler.simulation.simulator import simulate_run
+
+        events_path = simulate_run(config, run_directory)
+        write_trace(run_directory)
+        return TrainingResult(run_directory=run_directory, events_path=events_path, dataset_source="simulated")
+
+    dataset_source = prepare_dataset(config.train)
+
     if config.cluster.backend == "docker":
         from swim_straggler.containers.runner import run_in_containers
 
-        return run_in_containers(config, run_directory)
+        result = run_in_containers(config, run_directory)
+        write_trace(result.run_directory)
+        return result
 
     world_size = config.cluster.world_size
     if config.cluster.backend == "gloo":
@@ -74,4 +84,5 @@ def run_training(config, run_directory=None):
     rank_files = [run_directory / f"events_rank_{rank}.jsonl" for rank in range(world_size)]
     events_path = run_directory / "events.jsonl"
     merge_event_files(rank_files, events_path)
+    write_trace(run_directory)
     return TrainingResult(run_directory=run_directory, events_path=events_path, dataset_source=dataset_source)

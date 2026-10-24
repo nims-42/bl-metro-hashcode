@@ -35,9 +35,15 @@ def write_spec(tmp_path, **changes):
 
 def test_plan_expands_faults_detectors_and_repeats(tmp_path):
     planned = plan_runs(load_sweep_spec(write_spec(tmp_path)))
-    assert sorted(run.key for run in planned) == sorted([
-        ("off", "healthy", 0), ("off", "healthy", 1),  # `off` runs only on the healthy fault
-        ("swim", "healthy", 0), ("swim", "healthy", 1), ("swim", "x4", 0), ("swim", "x4", 1)])
+    assert sorted(run.key for run in planned) == sorted([  # (detector, fault, workers, repeat)
+        ("off", "healthy", 4, 0), ("off", "healthy", 4, 1),  # `off` runs only on the healthy fault
+        ("swim", "healthy", 4, 0), ("swim", "healthy", 4, 1), ("swim", "x4", 4, 0), ("swim", "x4", 4, 1)])
+
+
+def test_plan_can_also_vary_the_number_of_workers(tmp_path):
+    planned = plan_runs(load_sweep_spec(write_spec(tmp_path, worker_counts=[4, 16])))
+    assert sorted({run.config.cluster.world_size for run in planned}) == [4, 16]
+    assert len(planned) == 12 and len({run.config.name for run in planned}) == 12
 
 
 def test_every_detector_sees_the_same_seeds(tmp_path):
@@ -79,7 +85,7 @@ def row(detector, fault, found, delay, false_confirmations=0, step_ms=30.0, faul
     return {"detector": detector, "fault": fault, "culprit_found": found if faulty else None, "faulty_workers": faulty,
             "delay_steps": delay, "delay_after_applied_steps": delay, "everyone_knew_delay_steps": delay,
             "compute_ratio": 2.0 if faulty else None, "false_confirmations": false_confirmations, "false_suspicions": 0,
-            "mean_step_ms": step_ms}
+            "mean_step_ms": step_ms, "workers": 4}
 
 
 def test_group_summary_counts_only_found_runs_for_the_delay():

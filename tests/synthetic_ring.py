@@ -35,7 +35,7 @@ class SyntheticRing:
         for _ in range(2 * (self.world_size - 1)):
             messages = [detector.make_gossip() for detector in self.detectors]
             for rank, message in enumerate(messages):
-                self.detectors[(rank + 1) % self.world_size].receive_gossip(message)
+                self.detectors[(rank + 1) % self.world_size].receive_gossip(message, sender=rank)
         waits_per_rank = waits_in_ring(compute_seconds_per_rank)
         for rank, detector in enumerate(self.detectors):
             for event in detector.finish_step(step, waits_per_rank[rank]):

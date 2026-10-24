@@ -1,8 +1,8 @@
 # A slow LINK, not a slow processor: every packet worker 2 sends is delayed by 10 ms from step 50 (tc netem).
-# The compute time of worker 2 stays normal, so the current detector is expected NOT to confirm it
-# (peers vote no). Detecting link faults is planned for milestone 10.
+# The compute time of worker 2 stays normal, so the detector should NOT confirm anybody (peers vote no).
+# EXPERIMENTAL: diagnose_network turns repeated rejected suspicions into "the delay is not compute (network?)".
 name: docker_network
 cluster: {world_size: 4, backend: docker, container_cpus: 1.0}
-train: {steps: 150, batch_size: 64, dataset: mnist}
+train: {steps: 200, batch_size: 64, dataset: mnist}
 fault: {kind: container_network_delay, workers: [2], network_delay_ms: 10, start_step: 50}
-detector: {mode: swim, k_probes: 2}
+detector: {mode: swim, k_probes: 2, diagnose_network: true}

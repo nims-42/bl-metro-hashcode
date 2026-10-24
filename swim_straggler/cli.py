@@ -1,4 +1,4 @@
-"""Command line entry point: train, demo (--compare for the baselines), sweep, report, dashboard, build-image (Docker) and worker (one worker, used inside containers)."""
+"""Command line entry point: train, demo (--compare for the baselines), simulate, trace, sweep, report, dashboard, build-image (Docker) and worker (one worker, used inside containers)."""
 
 import argparse
 import copy
@@ -16,6 +16,8 @@ DEFAULT_DEMO_CONFIG = "experiments/configs/demo.yaml"
 
 
 def warn_if_too_many_workers(config):
+    if config.cluster.backend == "simulated":
+        return  # nothing runs in parallel; the simulator is one ordinary program
     available_processors = os.cpu_count() or 1
     world_size = config.cluster.world_size
     if config.cluster.backend == "docker":
@@ -36,10 +38,15 @@ def print_training_summary(result, events):
     summary = summarize_training(events)
     print(f"data source          : {result.dataset_source}")
     print(f"steps                : {summary['steps']}")
-    print(f"loss (first 5 steps) : {summary['loss_at_start']:.4f}")
-    print(f"loss (last 5 steps)  : {summary['loss_at_end']:.4f}")
-    print(f"mean step time       : {summary['mean_step_seconds'] * 1000:.1f} ms")
+    if summary["loss_at_start"] is None:
+        print("SIMULATION           : nothing was trained; the timings come from the simulator's model")
+        print(f"mean step time       : {summary['mean_step_seconds'] * 1000:.1f} ms (simulated)")
+    else:
+        print(f"loss (first 5 steps) : {summary['loss_at_start']:.4f}")
+        print(f"loss (last 5 steps)  : {summary['loss_at_end']:.4f}")
+        print(f"mean step time       : {summary['mean_step_seconds'] * 1000:.1f} ms")
     print(f"event log            : {result.events_path}")
+    print(f"step-by-step trace   : {result.run_directory / 'trace.log'}")
 
 
 def print_detection_summary(events):
@@ -64,8 +71,10 @@ def print_detection_summary(events):
             print("    every worker knew by          : not applicable (only the central monitor, worker 0, decides)")
         else:
             print(f"    every worker knew by          : step {report['all_workers_knew_at_step']}")
-            if report["workers_that_never_learned"]:
-                print(f"    never learned                 : workers {report['workers_that_never_learned']}")
+            never_learned = report["workers_that_never_learned"]
+            if never_learned:
+                shown = never_learned if len(never_learned) <= 12 else f"{len(never_learned)} workers"
+                print(f"    never learned                 : workers {shown}")
     if summary["detector_mode"] == "steptime":
         print("  note: with step times only, each worker can judge nobody but itself; in synchronous training")
         print("        all step times rise together, so healthy workers end up accusing themselves.")
@@ -74,6 +83,8 @@ def print_detection_summary(events):
     for rank, subject, step in summary["false_confirmations"][:5]:
         print(f"    worker {rank} confirmed worker {subject} at step {step}")
     print(f"  stragglers cleared again          : {summary['cleared_events']}")
+    for rank, step in summary["network_diagnoses"]:
+        print(f"  EXPERIMENTAL diagnosis            : worker {rank} at step {step}: the delay is not compute (network?)")
 
 
 def run_and_report(config):
@@ -98,6 +109,8 @@ def command_train(arguments):
     except (ConfigError, OSError) as error:
         print(f"error: {error}")
         return 1
+    if arguments.trace:
+        config.detector.trace = True
     return run_and_report(config)
 
 
@@ -112,6 +125,8 @@ def command_demo(arguments):
     except (ConfigError, OSError) as error:
         print(f"error: {error}")
         return 1
+    if arguments.trace:
+        config.detector.trace = True
     if arguments.compare:
         return run_comparison(config, arguments.repeats)
     return run_and_report(config)
@@ -188,6 +203,62 @@ def run_comparison(base_config, repeats=1):
     return 0
 
 
+DEFAULT_SIMULATION_CONFIG = "experiments/configs/simulated.yaml"
+
+
+def command_simulate(arguments):
+    """Simulate a run: the real detectors on made-up timings (cluster.backend: simulated)."""
+    from swim_straggler.simulation.simulator import fit_timing_model
+
+    try:
+        config = load_config(arguments.config)
+        config.cluster.backend = "simulated"
+        if arguments.workers is not None:
+            config.cluster.world_size = arguments.workers
+            config.fault.workers = [worker for worker in config.fault.workers if worker < arguments.workers] or [arguments.workers // 2]
+            config.detector.k_probes = min(config.detector.k_probes, arguments.workers - 2)
+        if arguments.steps is not None:
+            config.train.steps = arguments.steps
+        if arguments.trace:
+            config.detector.trace = True
+        if arguments.fit_from:
+            run_path = Path(arguments.fit_from)
+            fitted = fit_timing_model(read_events(run_path if run_path.is_file() else run_path / "events.jsonl"))
+            print(f"timing model fitted to {arguments.fit_from}: {fitted}")
+            print("(to keep it, copy these values into the simulation section of your config)")
+            for name, value in fitted.items():
+                setattr(config.simulation, name, value)
+        config.validate()
+    except (ConfigError, OSError, ValueError) as error:
+        print(f"error: {error}")
+        return 1
+    return run_and_report(config)
+
+
+def command_trace(arguments):
+    """Print the step-by-step trace of a finished run, optionally only part of it."""
+    from swim_straggler.telemetry.trace import parse_step_range, trace_text
+
+    run_path = Path(arguments.run)
+    events_path = run_path if run_path.is_file() else run_path / "events.jsonl"
+    if not events_path.exists():
+        print(f"error: no events.jsonl in {run_path}")
+        return 1
+    try:
+        first_step, last_step = parse_step_range(arguments.steps)
+    except ValueError:
+        print(f"error: --steps must look like 60-90, 60- or 60, not '{arguments.steps}'")
+        return 1
+    text = trace_text(read_events(events_path), worker=arguments.worker, about=arguments.about,
+                      first_step=first_step, last_step=last_step)
+    if arguments.output:
+        Path(arguments.output).write_text(text, encoding="utf-8")
+        print(f"wrote {arguments.output}")
+    else:
+        print(text, end="")
+    return 0
+
+
 def command_sweep(arguments):
     from swim_straggler.evaluation.report import write_results
     from swim_straggler.evaluation.sweep import run_sweep
@@ -260,6 +331,7 @@ def main(argument_list=None):
 
     train_parser = subcommands.add_parser("train", help="run distributed training")
     train_parser.add_argument("--config", required=True, help="path to a YAML config file")
+    train_parser.add_argument("--trace", action="store_true", help="also log the reasoning behind every decision (see trace.log)")
     train_parser.set_defaults(handler=command_train)
 
     demo_parser = subcommands.add_parser("demo", help="train with an injected slow worker and show what the detector found")
@@ -268,7 +340,25 @@ def main(argument_list=None):
     demo_parser.add_argument("--compare", action="store_true",
                              help="also run the baseline detectors (central monitor, step time) and print a comparison table")
     demo_parser.add_argument("--repeats", type=int, default=1, help="with --compare: runs per detector (default 1)")
+    demo_parser.add_argument("--trace", action="store_true", help="also log the reasoning behind every decision (see trace.log)")
     demo_parser.set_defaults(handler=command_demo)
+
+    simulate_parser = subcommands.add_parser(
+        "simulate", help="SIMULATION: run the real detectors on made-up timings, for groups too large to run")
+    simulate_parser.add_argument("--config", default=DEFAULT_SIMULATION_CONFIG, help="config file (default: the simulation config)")
+    simulate_parser.add_argument("--workers", type=int, help="number of simulated workers")
+    simulate_parser.add_argument("--steps", type=int, help="number of steps")
+    simulate_parser.add_argument("--trace", action="store_true", help="also log the reasoning behind every decision")
+    simulate_parser.add_argument("--fit-from", help="fit the timing model to a measured run folder first")
+    simulate_parser.set_defaults(handler=command_simulate)
+
+    trace_parser = subcommands.add_parser("trace", help="show what happened in a run, step by step (all of it or a part)")
+    trace_parser.add_argument("run", help="a run folder (or its events.jsonl)")
+    trace_parser.add_argument("--worker", type=int, help="only what this worker did")
+    trace_parser.add_argument("--about", type=int, help="only what concerns this worker (suspicions, answers, verdicts, faults)")
+    trace_parser.add_argument("--steps", help="only these steps, for example 60-90, 60- or 75")
+    trace_parser.add_argument("--output", help="write to this file instead of printing")
+    trace_parser.set_defaults(handler=command_trace)
 
     sweep_parser = subcommands.add_parser("sweep", help="repeat runs over detectors and faults, then write results and plots")
     sweep_parser.add_argument("--spec", default="experiments/sweeps/main.yaml", help="sweep file (default: the main sweep)")

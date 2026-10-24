@@ -17,11 +17,7 @@ from torch.nn import functional
 
 from swim_straggler.allreduce.header import Header, HeaderCodec
 from swim_straggler.allreduce.ring import ring_allreduce
-from swim_straggler.config import ConfigError
-from swim_straggler.detector.base import Detector
-from swim_straggler.detector.central import CentralMonitor
-from swim_straggler.detector.steptime import StepTimeDetector
-from swim_straggler.detector.swim import StragglerDetector
+from swim_straggler.detector.factory import create_detector
 from swim_straggler.faults.inject import FaultInjector, SlowLinkTransport
 from swim_straggler.telemetry.events import EventLogger
 from swim_straggler.train.data import BatchProvider, load_rank_shard
@@ -41,20 +37,6 @@ def create_model_with_seed(seed):
     with MODEL_CREATION_LOCK:
         torch.manual_seed(seed)
         return SmallConvolutionalNetwork()
-
-
-def create_detector(config, rank, world_size):
-    """The detector of this worker. Mode "off" gives a detector that does nothing."""
-    mode = config.detector.mode
-    if mode == "off":
-        return Detector()
-    if mode == "swim":
-        return StragglerDetector(rank, world_size, config.detector, seed=config.train.seed)
-    if mode == "central":
-        return CentralMonitor(rank, world_size, config.detector)
-    if mode == "steptime":
-        return StepTimeDetector(rank, world_size, config.detector)
-    raise ConfigError(f"unknown detector.mode '{mode}'")
 
 
 def flatten_gradients_with_loss(model, loss, extra_values=None):
@@ -82,6 +64,13 @@ def write_averaged_gradients_back(model, summed_vector, world_size):
         parameter.grad.copy_(averaged_vector[position : position + parameter_size].view_as(parameter))
         position += parameter_size
     return averaged_vector[position].item()
+
+
+def log_detector_events(logger, detector_events):
+    """Decisions are logged as "detector" events, the reasoning behind them (detector.trace) as "trace" events."""
+    for detector_event in detector_events:
+        event_name = "trace" if detector_event.pop("trace", False) else "detector"
+        logger.log(event_name, **detector_event)
 
 
 def parameter_checksum(model):
@@ -137,7 +126,7 @@ def train_one_rank(transport, config, dataset_source, run_directory):
                           wait_time=previous_wait_seconds, gossip=tuple(detector.make_gossip()))
 
         def absorb_header(received_header, round_number):
-            detector.receive_gossip(received_header.gossip)
+            detector.receive_gossip(received_header.gossip, sender=received_header.sender)
 
         detector.start_step(step, compute_seconds)
 
@@ -153,8 +142,7 @@ def train_one_rank(transport, config, dataset_source, run_directory):
         previous_wait_seconds = wait_seconds
 
         compute_of_every_worker = vector[-world_size:].tolist() if detector.needs_compute_reports else None
-        for detector_event in detector.finish_step(step, wait_seconds_per_round, compute_of_every_worker):
-            logger.log("detector", **detector_event)
+        log_detector_events(logger, detector.finish_step(step, wait_seconds_per_round, compute_of_every_worker))
 
         # 3. update
         average_loss = write_averaged_gradients_back(model, vector, world_size)
@@ -173,8 +161,7 @@ def train_one_rank(transport, config, dataset_source, run_directory):
             fault_active=fault_is_active,
             injected_compute_seconds=injected_seconds,
         )
-        for detector_event in detector.after_update(step, step_seconds):
-            logger.log("detector", **detector_event)
+        log_detector_events(logger, detector.after_update(step, step_seconds))
 
     logger.log(
         "run_end",

@@ -17,6 +17,7 @@ from swim_straggler.dashboard.data import (
     run_overview, step_rows, world_size_of,
 )
 from swim_straggler.telemetry.events import summarize_detection
+from swim_straggler.telemetry.trace import trace_text
 
 BELIEF_COLOURS = {"alive": "#4c9a6a", "suspect": "#e0a030", "straggler": "#c8463c"}
 
@@ -100,6 +101,20 @@ def show_comparison(runs_directory, events):
                        "Create them with:  swim-straggler demo --compare   (same config, one run per detector)")
 
 
+def show_trace(events, world_size, last_step):
+    if not any(event["event"] == "trace" for event in events):
+        streamlit.caption("This run logged decisions only. Run with --trace to also see the reasoning behind them.")
+    choices = ["everyone"] + [f"worker {rank}" for rank in range(world_size)]
+    left, middle, right = streamlit.columns(3)
+    done_by = left.selectbox("what was done by", choices, key="trace_worker")
+    about = middle.selectbox("what concerns", choices, key="trace_about")
+    first_step, last_shown_step = right.slider("steps", 0, max(last_step, 1), (0, max(last_step, 1)), key="trace_steps")
+    text = trace_text(events, worker=None if done_by == "everyone" else int(done_by.split()[1]),
+                      about=None if about == "everyone" else int(about.split()[1]),
+                      first_step=first_step, last_step=last_shown_step)
+    streamlit.code(text, language=None)
+
+
 def main():
     streamlit.set_page_config(page_title="swim-straggler", layout="wide")
     streamlit.title("swim-straggler")
@@ -118,6 +133,9 @@ def main():
 
     overview = run_overview(events)
     streamlit.subheader(chosen_name + ("" if is_finished else "  (still running)"))
+    if any(event["event"] == "run_start" and event.get("simulated") for event in events):
+        streamlit.warning("SIMULATION: nothing was trained or timed. The detectors are the real code; the compute and "
+                          "message times come from the simulator's random model (docs/simulation.md).")
     if overview:
         streamlit.dataframe(pandas.DataFrame([overview]), hide_index=True)
     steps = step_rows(events)
@@ -181,6 +199,9 @@ def main():
             streamlit.dataframe(pandas.DataFrame(detector_rows), hide_index=True, use_container_width=True)
         else:
             streamlit.write("No detector events.")
+
+        with streamlit.expander("Trace: every event, step by step (the same text as trace.log)"):
+            show_trace(events, world_size, last_step)
 
         # Hidden until asked for. The choice is kept in session_state so it survives the auto refresh.
         showing_comparison = streamlit.session_state.get("show_comparison", False)

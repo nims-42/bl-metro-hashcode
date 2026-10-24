@@ -92,6 +92,12 @@ def test_the_app_draws_a_real_run_without_errors(tmp_path, monkeypatch):
     assert not app.exception, app.exception
     headers = [header.value for header in app.header]
     assert headers == ["What the detectors found", "The signal", "One step up close", "Detector events"]
+    trace_text = [code.value for code in app.code]
+    assert trace_text and trace_text[0].startswith("trace of 'test'")
+
+    app.selectbox(key="trace_worker").select("worker 2").run()  # only what worker 2 did
+    assert not app.exception, app.exception
+    assert "filter: only what w2 did" in app.code[0].value
 
 
 def test_the_app_explains_an_empty_runs_folder(tmp_path, monkeypatch):

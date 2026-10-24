@@ -7,7 +7,7 @@ import sys
 
 from swim_straggler.config import DetectorConfig
 from swim_straggler.detector.gossip import STRAGGLER_VERDICT, SUSPICION, Notice, encode_gossip
-from swim_straggler.detector.swim import StragglerDetector
+from swim_straggler.detector.swim import Probe, StragglerDetector
 from swim_straggler.detector.table import ALIVE, STRAGGLER, SUSPECT, TableRow
 
 WORLD_SIZE = 6
@@ -237,3 +237,28 @@ def test_importing_the_detector_does_not_load_torch_or_networking():
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
                             cwd=DETECTOR_DIRECTORY.parent.parent)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_experimental_network_diagnosis_after_repeated_rejections_of_normal_workers():
+    from swim_straggler.config import DetectorConfig as Settings
+
+    detector = StragglerDetector(0, 6, Settings(diagnose_network=True, diagnosis_rejections=2, diagnosis_window_steps=50))
+    for row_rank in range(6):
+        detector.table.rows[row_rank].step = 1
+        detector.table.rows[row_rank].compute_seconds = 0.02  # everybody computes normally
+    events = []
+    for step in (20, 30):
+        detector.probes[3] = Probe(start_step=step, peers=[1, 2])
+        detector.reject(3, step, "majority disagrees", 0, 2)
+        events += detector.finish_step(step, [0.0] * 10)
+    diagnoses = [event for event in events if event["action"] == "delay_not_compute"]
+    assert len(diagnoses) == 1 and diagnoses[0]["step"] == 30
+    rejected = [event for event in events if event["action"] == "rejected"]
+    assert rejected[0]["compute_ratio"] == 1.0
+
+    quiet = StragglerDetector(0, 6, Settings())  # switched off by default
+    quiet.probes[3] = Probe(start_step=20, peers=[1, 2])
+    quiet.reject(3, 20, "majority disagrees", 0, 2)
+    quiet.probes[3] = Probe(start_step=30, peers=[1, 2])
+    quiet.reject(3, 30, "majority disagrees", 0, 2)
+    assert not [event for event in quiet.finish_step(30, [0.0] * 10) if event["action"] == "delay_not_compute"]

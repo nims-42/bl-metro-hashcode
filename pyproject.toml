@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "swim-straggler"
 version = "0.1.0"
 requires-python = ">=3.10"
-dependencies = ["torch", "numpy", "pyyaml"]
+dependencies = ["torch", "numpy", "pyyaml", "matplotlib"]
 
 [project.optional-dependencies]
 dev = ["pytest"]

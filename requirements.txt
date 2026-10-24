@@ -5,6 +5,6 @@
 torch
 numpy
 pyyaml
+matplotlib  # the plots of sweep results
 pytest
-# Only for the dashboard (swim-straggler dashboard):
 streamlit

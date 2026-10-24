@@ -2,11 +2,16 @@
 
 The training loop calls these hooks in this order every step:
     start_step(step, compute_seconds)                       after computing, before the all-reduce
-    make_gossip() / receive_gossip(numbers)                  in every all-reduce round
+    make_gossip() / receive_gossip(numbers, sender)          in every all-reduce round
     finish_step(step, wait_seconds_per_round, reports)       after the all-reduce
     after_update(step, step_seconds)                         when the step is over
 Each detector uses only the hooks it needs; the others do nothing. The `finish_step` and
 `after_update` hooks return the new events (a list of dictionaries).
+
+Two kinds of events:
+  * decisions (suspected, confirmed, rejected, cleared, learned_...): always returned;
+  * trace events (marked "trace": True): the reasoning behind them, step by step. They are only
+    returned when detector.trace is on, because they make the log much longer.
 """
 
 import statistics
@@ -24,7 +29,13 @@ class Detector:
     def make_gossip(self):
         return []
 
-    def receive_gossip(self, numbers):
+    def receive_gossip(self, numbers, sender=None):
+        pass
+
+    def gossip_contents(self):  # the simulator's way to pass gossip without numbers (see swim.py)
+        return [], []
+
+    def absorb_gossip(self, rows, notices, sender=None):
         pass
 
     def finish_step(self, step, wait_seconds_per_round, compute_seconds_of_every_worker=None):
@@ -35,6 +46,11 @@ class Detector:
 
     def straggler_ranks(self):
         return []
+
+
+def trace_event(action, subject, step, **details):
+    """An event that explains the reasoning of a detector (only logged when detector.trace is on)."""
+    return {"trace": True, "action": action, "subject": subject, "step": step, **details}
 
 
 def smooth(previous_value, new_value, ewma_alpha):

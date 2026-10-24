@@ -1,0 +1,16 @@
+# SIMULATION sweep for very large groups: 512 and 1024 workers, one run per cell.
+# Run it with:  swim-straggler sweep --spec experiments/sweeps/simulation_large.yaml
+# Slow: one 1024-worker SWIM step takes about 10 seconds to simulate, so a run takes about half an hour.
+name: simulation_large
+base_config: ../configs/simulated.yaml
+overrides:
+  train: {steps: 150}
+keep_run_folders: false  # simulated runs are reproduced exactly by their seed; their logs are large
+worker_counts: [512, 1024]
+repeats: 1
+faults:
+  - {label: healthy, kind: none}
+  - {label: x2, kind: compute, workers: [2], multiplier: 2.0, start_step: 60}
+detectors:
+  - {label: swim, mode: swim}
+  - {label: central, mode: central}

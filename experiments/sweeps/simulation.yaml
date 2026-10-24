@@ -1,0 +1,23 @@
+# SIMULATION sweep: the main sweep's faults and detectors, simulated for groups of 4 to 256 workers.
+# Run it with:  swim-straggler sweep --spec experiments/sweeps/simulation.yaml
+# 336 runs. Small groups take seconds; one 256-worker SWIM run takes about 2 minutes (the simulator
+# passes every gossip message of every ring round, 2(N-1) rounds per step). About an hour in all on a laptop.
+# The 4-worker runs are compared with the measured main sweep (compare_with) as a check of the model.
+name: simulation
+base_config: ../configs/simulated.yaml
+overrides:
+  train: {steps: 200}
+compare_with: results/main
+keep_run_folders: false  # simulated runs are reproduced exactly by their seed; their logs are large
+worker_counts: [4, 8, 16, 32, 64, 128, 256]
+repeats: 3
+faults:
+  - {label: healthy, kind: none}
+  - {label: x1.5, kind: compute, workers: [2], multiplier: 1.5, start_step: 60}
+  - {label: x2, kind: compute, workers: [2], multiplier: 2.0, start_step: 60}
+  - {label: x4, kind: compute, workers: [2], multiplier: 4.0, start_step: 60}
+detectors:
+  - {label: swim, mode: swim}
+  - {label: swim-strict, mode: swim, factor: 1.5, consecutive_steps: 8}
+  - {label: central, mode: central}
+  - {label: steptime, mode: steptime}

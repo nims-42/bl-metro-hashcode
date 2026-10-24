@@ -1,0 +1,23 @@
+# SIMULATION: no training; the real detectors run on timings drawn from the model in the
+# `simulation` section (fitted to measured 4-worker gloo runs on a 2-processor machine).
+# Run it with:  swim-straggler simulate --workers 64
+name: simulated
+cluster:
+  world_size: 16
+  backend: simulated
+train:
+  steps: 150
+  seed: 0
+fault:
+  kind: compute
+  workers: [2]
+  multiplier: 2.0
+  start_step: 60
+detector:
+  mode: swim
+simulation:
+  compute_ms: 11.7
+  compute_noise: 0.33
+  message_latency_ms: 0.6
+  latency_noise: 0.5
+  allreduce_data_ms: 1.3

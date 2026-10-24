@@ -18,6 +18,10 @@ class TableRow:
     probe_answer_step: int = -1  # the step at which the worker last gave this answer
     probe_says_slow: bool = False
 
+    def copy(self):
+        return TableRow(self.rank, self.step, self.compute_seconds, self.probe_subject,
+                        self.probe_answer_step, self.probe_says_slow)
+
 
 class MembershipTable:
     def __init__(self, world_size):

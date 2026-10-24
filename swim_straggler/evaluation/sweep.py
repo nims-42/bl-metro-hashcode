@@ -1,7 +1,8 @@
 """Sweeps: the same experiment repeated over detectors, faults and random seeds.
 
 A sweep file (YAML) names a base config, optional overrides, a list of faults, a list of
-detectors and a number of repeats. Every (fault, detector, repeat) combination is one run.
+detectors and a number of repeats, and optionally a list of group sizes (worker_counts; used by
+the simulator sweeps). Every (fault, detector, group size, repeat) combination is one run.
 Repeat r uses seed base_seed + r for every detector, so detectors are compared on the same data.
 
 Each finished run appends one line to `runs.jsonl` in the results folder, so a sweep that is
@@ -31,6 +32,10 @@ class SweepSpec:
     faults: list = field(default_factory=list)  # each: {label: ..., and FaultConfig fields}
     detectors: list = field(default_factory=list)  # each: {label: ..., and DetectorConfig fields, optional only_faults}
     repeats: int = 3
+    worker_counts: list = field(default_factory=list)  # group sizes to try; empty: the base config's world_size
+    compare_with: str = ""  # results folder of a measured sweep to compare the simulation with (report only)
+    keep_run_folders: bool = True  # False: delete each run's folder once its numbers are in runs.jsonl
+    #                                (for the simulator: its runs are exactly reproducible from the seed, and large)
 
 
 @dataclass
@@ -42,7 +47,7 @@ class PlannedRun:
 
     @property
     def key(self):
-        return (self.detector, self.fault, self.repeat)
+        return (self.detector, self.fault, self.config.cluster.world_size, self.repeat)
 
 
 def load_sweep_spec(file_path):
@@ -79,6 +84,7 @@ def plan_runs(spec, spec_directory=Path(".")):
             set_section_fields(getattr(base, section_name), values, section_name)
 
     planned = []
+    worker_counts = spec.worker_counts or [base.cluster.world_size]
     for entry in spec.faults + spec.detectors:
         entry["label"] = "off" if entry.get("label") is False else str(entry.get("label"))
     for fault in spec.faults:
@@ -88,15 +94,17 @@ def plan_runs(spec, spec_directory=Path(".")):
             if only_faults is not None and fault["label"] not in only_faults:
                 continue
             detector_fields = {key: value for key, value in detector.items() if key not in ("label", "only_faults")}
-            for repeat in range(spec.repeats):
+            for workers, repeat in [(workers, repeat) for workers in worker_counts for repeat in range(spec.repeats)]:
                 config = copy.deepcopy(base)
+                config.cluster.world_size = workers
                 config.fault = type(base.fault)()  # every fault starts from the defaults, not from the base config's fault
                 set_section_fields(config.fault, fault_fields, "fault")
                 set_section_fields(config.detector, detector_fields, "detector")
                 if config.detector.mode == "swim":
                     config.detector.k_probes = min(config.detector.k_probes, config.cluster.world_size - 2)
                 config.train.seed = base.train.seed + repeat
-                config.name = f"{spec.name}_{detector['label']}_{fault['label']}_{repeat}".replace(" ", "_")
+                size_part = f"_{workers}w" if spec.worker_counts else ""
+                config.name = f"{spec.name}_{detector['label']}_{fault['label']}{size_part}_{repeat}".replace(" ", "_")
                 config.validate()
                 planned.append(PlannedRun(detector["label"], fault["label"], repeat, config))
     return planned
@@ -122,20 +130,26 @@ def machine_description():
     }
 
 
-def run_planned(planned, results_path=None, train=None, progress=print):
+def run_planned(planned, results_path=None, train=None, progress=print, keep_run_folders=True):
     """Run every planned run that is not in the results file yet. Returns all rows (old and new)."""
+    import shutil
+
     from swim_straggler.train.launcher import run_training
 
     train = train or run_training
     rows = read_finished_rows(results_path) if results_path else []
-    done = {(row["detector"], row["fault"], row["repeat"]) for row in rows}
+    done = {(row["detector"], row["fault"], row["workers"], row["repeat"]) for row in rows}
     remaining = [run for run in planned if run.key not in done]
     for position, run in enumerate(remaining, start=1):
-        progress(f"[{position}/{len(remaining)}] detector={run.detector} fault={run.fault} repeat={run.repeat}")
+        progress(f"[{position}/{len(remaining)}] detector={run.detector} fault={run.fault} "
+                 f"workers={run.config.cluster.world_size} repeat={run.repeat}")
         result = train(run.config)
         row = {"detector": run.detector, "fault": run.fault, "repeat": run.repeat, "seed": run.config.train.seed,
                "workers": run.config.cluster.world_size, "backend": run.config.cluster.backend,
                "run_directory": str(result.run_directory), **run_metrics(read_events(result.events_path))}
+        if not keep_run_folders:
+            shutil.rmtree(result.run_directory, ignore_errors=True)
+            row["run_directory"] = None  # deleted; the same config and seed reproduce it exactly
         rows.append(row)
         if results_path:
             with open(results_path, "a", encoding="utf-8") as results_file:
@@ -154,5 +168,6 @@ def run_sweep(spec_path, results_root="results", progress=print):
         machine_path.write_text(json.dumps(machine_description(), indent=2), encoding="utf-8")
     (results_directory / "sweep.yaml").write_text(Path(spec_path).read_text(encoding="utf-8"), encoding="utf-8")
     progress(f"sweep '{spec.name}': {len(planned)} runs planned, results in {results_directory}")
-    rows = run_planned(planned, results_directory / "runs.jsonl", progress=progress)
+    rows = run_planned(planned, results_directory / "runs.jsonl", progress=progress,
+                       keep_run_folders=spec.keep_run_folders)
     return results_directory, rows

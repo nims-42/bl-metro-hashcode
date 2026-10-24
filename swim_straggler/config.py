@@ -18,7 +18,8 @@ class ConfigError(ValueError):
 @dataclass
 class ClusterConfig:
     world_size: int = 8
-    backend: str = "gloo"  # "gloo" (one process per worker), "pipes" (one thread per worker) or "docker" (one container per worker)
+    backend: str = "gloo"  # "gloo" (one process per worker), "pipes" (one thread per worker), "docker" (one container per worker)
+    #                        or "simulated" (no training at all: the simulator makes up the timings, see the simulation section)
     master_address: str = "127.0.0.1"
     master_port: int = 0  # 0 means "choose any free port" (docker: 29500)
     container_image: str = "swim-straggler:latest"  # docker backend only
@@ -79,11 +80,33 @@ class DetectorConfig:
     gossip_rows: int = 8  # table rows carried in every message (rotating through the table if larger)
     verdict_slots: int = 4  # suspicion and verdict notices carried in every message
     verdict_repeat_steps: int = 5  # steps a worker keeps passing a verdict on after learning it
+    trace: bool = False  # also log the reasoning behind every decision, step by step (longer logs; see trace.log)
+    # EXPERIMENTAL (swim only): say "the delay is not compute" when suspicions keep being rejected because the
+    # accused worker computes normally. That pattern is what a slow network link produces (docs/experimental.md).
+    diagnose_network: bool = False
+    diagnosis_rejections: int = 3  # this many such rejections ...
+    diagnosis_window_steps: int = 60  # ... within this many steps
 
     def __post_init__(self):
         # YAML reads an unquoted `off` as the boolean False, so `mode: off` would otherwise be rejected.
         if self.mode is False:
             self.mode = "off"
+
+
+@dataclass
+class SimulationConfig:
+    """The timing model of the simulator (cluster.backend: simulated). Only used by the simulator.
+
+    The defaults were fitted to healthy runs measured on a 2-processor machine with 4 gloo workers
+    (see docs/simulation.md); `swim-straggler simulate --fit-from <run folder>` fits them to another run.
+    """
+
+    compute_ms: float = 11.7  # typical compute time of a healthy worker per step
+    compute_noise: float = 0.33  # spread of compute times: standard deviation of their logarithm
+    message_latency_ms: float = 0.6  # time a ring message takes to arrive (measured: the typical wait in a balanced round)
+    latency_noise: float = 0.5  # spread of the message latency (standard deviation of its logarithm)
+    allreduce_data_ms: float = 1.3  # work on the whole gradient once (adding, copying); each round handles 1/N of it
+    round_waits_up_to_workers: int = 32  # log the wait of every round only for at most this many workers (log size)
 
 
 @dataclass
@@ -94,6 +117,7 @@ class Config:
     train: TrainConfig = field(default_factory=TrainConfig)
     fault: FaultConfig = field(default_factory=FaultConfig)
     detector: DetectorConfig = field(default_factory=DetectorConfig)
+    simulation: SimulationConfig = field(default_factory=SimulationConfig)
 
     def to_dict(self):
         """The whole configuration as plain dictionaries, for writing into the event log."""
@@ -101,11 +125,11 @@ class Config:
 
     def validate(self):
         """Raise ConfigError listing every problem found."""
-        cluster, train, fault, detector = self.cluster, self.train, self.fault, self.detector
+        cluster, train, fault, detector, simulation = self.cluster, self.train, self.fault, self.detector, self.simulation
         compute_kinds = ("compute", "two", "intermittent", "spike")
         checks = [
             (cluster.world_size >= 2, "cluster.world_size must be at least 2"),
-            (cluster.backend in ("gloo", "pipes", "docker"), "cluster.backend must be gloo, pipes or docker"),
+            (cluster.backend in ("gloo", "pipes", "docker", "simulated"), "cluster.backend must be gloo, pipes, docker or simulated"),
             (cluster.container_cpus > 0, "cluster.container_cpus must be positive"),
             (0 <= cluster.master_port <= 65535, "cluster.master_port must be between 0 and 65535"),
             (train.steps >= 1, "train.steps must be at least 1"),
@@ -144,6 +168,15 @@ class Config:
             (detector.gossip_rows >= 1 and detector.verdict_slots >= 1,
              "detector.gossip_rows and detector.verdict_slots must be at least 1"),
             (detector.verdict_repeat_steps >= 1, "detector.verdict_repeat_steps must be at least 1"),
+            (isinstance(detector.trace, bool), "detector.trace must be true or false"),
+            (detector.diagnosis_rejections >= 1 and detector.diagnosis_window_steps >= 1,
+             "detector.diagnosis_rejections and diagnosis_window_steps must be at least 1"),
+            (cluster.backend != "simulated" or fault.kind in ("none", "compute", "two", "intermittent", "spike", "link"),
+             "the simulator can only simulate the faults none, compute, two, intermittent, spike and link"),
+            (simulation.compute_ms > 0 and simulation.compute_noise >= 0 and simulation.latency_noise >= 0,
+             "simulation.compute_ms must be positive and the noise values 0 or more"),
+            (simulation.message_latency_ms >= 0 and simulation.allreduce_data_ms >= 0,
+             "simulation.message_latency_ms and allreduce_data_ms must be 0 or more"),
         ]
         problems = [message for condition_holds, message in checks if not condition_holds]
         if problems:
@@ -155,6 +188,7 @@ SECTION_CLASSES = {
     "train": TrainConfig,
     "fault": FaultConfig,
     "detector": DetectorConfig,
+    "simulation": SimulationConfig,
 }
 TOP_LEVEL_FIELDS = ("name", "run_directory")
 

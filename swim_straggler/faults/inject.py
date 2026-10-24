@@ -12,10 +12,8 @@ Link faults delay every message the worker sends, while its compute stays normal
 
 import time
 
-from swim_straggler.config import CONTAINER_FAULT_KINDS
+from swim_straggler.faults.schedule import COMPUTE_FAULT_KINDS, fault_is_active
 from swim_straggler.transport.base import Transport
-
-COMPUTE_FAULT_KINDS = ("compute", "two", "intermittent", "spike")
 
 
 class FaultInjector:
@@ -25,17 +23,7 @@ class FaultInjector:
 
     def is_fault_active(self, step):
         """True if this worker is supposed to be slow during the given step."""
-        fault = self._fault
-        if fault.kind == "none" or fault.kind in CONTAINER_FAULT_KINDS or self._rank not in fault.workers:
-            return False  # container faults are applied from outside by the fault controller
-        if step < fault.start_step:
-            return False
-        if fault.duration > 0 and step >= fault.start_step + fault.duration:
-            return False
-        if fault.kind == "intermittent":
-            steps_since_start = step - fault.start_step
-            return (steps_since_start // fault.period) % 2 == 0  # on, off, on, off, ...
-        return True
+        return fault_is_active(self._fault, self._rank, step)
 
     def extra_compute_seconds(self, step, measured_compute_seconds):
         if self._fault.kind in COMPUTE_FAULT_KINDS and self.is_fault_active(step):
