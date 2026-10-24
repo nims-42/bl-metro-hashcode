@@ -22,13 +22,13 @@ Tick a box when the task is done and committed.
 - [x] `tests/test_membership.py`
 
 ## 4. Lifeguard: `src/lifeguard.py` (§6.2, §6.3, §6.5)
-- [ ] LHM saturating counter 0..S and its five events
-- [ ] Probe timeout / probe interval / suspicion threshold scaled by (LHM + 1)
-- [ ] LHA-Suspicion timeout (Min, Max, C, K) with an injectable clock
-- [ ] Self-check ("am I the slow one?") that blocks accusations
-- [ ] Buddy System gossip ordering
-- [ ] Classification: compute vs network
-- [ ] `tests/test_lifeguard.py`
+- [x] LHM saturating counter 0..S and its five events
+- [x] Probe timeout / probe interval / suspicion threshold scaled by (LHM + 1)
+- [x] LHA-Suspicion timeout (Min, Max, C, K) with an injectable clock
+- [x] Self-check ("am I the slow one?") that blocks accusations
+- [x] Buddy System gossip ordering
+- [x] Classification: compute vs network
+- [x] `tests/test_lifeguard.py`
 
 ## 5. Metrics: `src/metrics.py` (§3.2 L7, §9)
 - [ ] Per-node, per-step JSON line to `/results/<run_id>/<node_id>.jsonl`, flushed every step
