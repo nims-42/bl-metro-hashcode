@@ -31,8 +31,8 @@ Tick a box when the task is done and committed.
 - [x] `tests/test_lifeguard.py`
 
 ## 5. Metrics: `src/metrics.py` (§3.2 L7, §9)
-- [ ] Per-node, per-step JSON line to `/results/<run_id>/<node_id>.jsonl`, flushed every step
-- [ ] Message counters, events, member states, LHM
+- [x] Per-node, per-step JSON line to `/results/<run_id>/<node_id>.jsonl`, flushed every step
+- [x] Message counters, events, member states, LHM
 
 ## 6. SWIM layer: `src/swim.py` (§3.3, §6.1, §6.4)
 - [ ] Ring view of everyone's `compute_t` / `wait_t` / `pred_lag` from relayed telemetry
