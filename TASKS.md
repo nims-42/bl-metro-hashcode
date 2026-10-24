@@ -73,10 +73,16 @@ Tick a box when the task is done and committed.
 - [x] Training stand-in does real CPU work (`COMPUTE_MODE=work`) so `docker update --cpus` actually slows a node; `--local` uses `sleep`
 - [x] A suspected node re-checks itself every step and refutes once it is back on time (fixes false positives from transient host noise)
 
+## 11. Demo support
+- [x] Console lines prefixed with the node name: startup, status every `LOG_EVERY` steps, detection events
+- [x] Console output is best-effort (a closed stdout never stops a node)
+- [x] Per-node processing time: `per_node_compute` scenario, `--set gpu<i>.KEY=VALUE`, `GPU<i>_COMPUTE_MS` in `compose.yaml`
+
 ## Open findings from the first runs
 - [ ] `slow_accuser`: when the straggler's successor is also slow, the self-check holds its accusation and only the successor observes the straggler directly. Under `--local` the original straggler is never caught; under Docker it was caught only after ~46 s (its slow successor is caught in ~8 s). Decide whether a peer may raise a suspicion from telemetry alone.
 - [ ] Detection takes ~8 s at N = 5 with α = 5, β = 6 (suspicion timeout). Try α = β = 2 and re-measure false positives under jitter.
 - [ ] Under Docker, host noise briefly suspects healthy nodes (1 per 300-step healthy run, 7 under 30 ms jitter); all were refuted before the timeout. Watch this when scaling N.
+- [ ] Under Docker, measured compute is ~20–35% above `COMPUTE_MS` (calibrated on an idle core). Fine for relative demos; recalibrate if absolute numbers matter.
 - [ ] A confirmed straggler stays `Failed` after its fault ends (CONFIRM is final in SWIM). Decide on recovery once mitigation is in scope.
 - [ ] Reconcile with the `nims/skeleton` branch, which uses a different layout (`swim_straggler/`).
 

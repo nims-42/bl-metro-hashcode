@@ -48,11 +48,36 @@ python experiments/run_experiments.py all --n 5                  # every scenari
 python experiments/run_experiments.py overhead --n 5             # step time, detection on vs off
 python experiments/run_experiments.py summarize <run_id>         # re-score an existing run
 python experiments/run_experiments.py run compute_fault --set ALPHA=2 --set BETA=2   # tune
+python experiments/run_experiments.py run no_fault --set gpu2.COMPUTE_MS=250          # one node only
 ```
 
 `run_experiments.py` writes a compose file for any `--n` to `results/<run_id>/compose.generated.yaml`, so scaling up needs no edits to `compose.yaml`.
 
-Scenarios: `no_fault`, `compute_fault`, `network_fault` (sleep on the send path), `jitter_only` (0–30 ms random extra compute on every node), `slow_accuser` (the straggler's successor is slow as well), and `cpu_limit` (`docker update --cpus`, Docker only).
+Scenarios: `no_fault`, `compute_fault`, `network_fault` (sleep on the send path), `jitter_only` (0–30 ms random extra compute on every node), `slow_accuser` (the straggler's successor is slow as well), `cpu_limit` (`docker update --cpus`, Docker only), and `per_node_compute` (every node has its own processing time from the start: 100, 110, 200, 105 and 90 ms at N = 5; only the 200 ms node should be flagged).
+
+`--set KEY=VALUE` applies to every node; `--set gpu2.KEY=VALUE` applies to gpu2 only and wins.
+
+### Per-node processing time and console output
+
+Each node prints lines prefixed with its name: a startup line, a status line every `LOG_EVERY` steps (compute, wait, pred_lag, LHM, and any member that isn't Alive), and one line per detection event. Under Compose, each line also carries the container prefix (`gpu3-1 |`):
+
+```text
+gpu2-1  | [gpu2] ring up: pred gpu1, succ gpu3, compute 200 ms (work)
+gpu3-1  | [gpu3] step   12 | SUSPECT_RAISED gpu2 (compute), asking gpu0, gpu4
+gpu3-1  | [gpu3] step   13 | PING_REQ_RESULT gpu2: agree 2, disagree 0, nack 0, missing 0
+gpu2-1  | [gpu2] step   13 | SUSPECTED_SELF gpu2 (compute) from gpu3
+gpu3-1  | [gpu3] step   25 | compute  126.7 ms  wait  129.6 ms  pred_lag  126.8 ms  LHM 0 | gpu2 Suspect (compute)
+gpu0-1  | [gpu0] step   41 | CONFIRM gpu2 (compute) from gpu3
+```
+
+To give nodes different processing times by hand, set `COMPUTE_MS` for all nodes and `GPU<i>_COMPUTE_MS` for one node:
+
+```bash
+GPU2_COMPUTE_MS=200 GPU1_COMPUTE_MS=110 GPU4_COMPUTE_MS=90 RUN_ID=hetero docker compose up --build
+docker compose logs gpu3        # one node's console output only
+```
+
+Under Docker the measured `compute_t` runs about 20–35% above `COMPUTE_MS`. The CPU work is calibrated on an idle core, and N busy containers then run slower. The ratios between nodes hold. The JSONL logs record the measured value.
 
 ## Run without Docker
 
@@ -80,4 +105,4 @@ The tests cover SWIM precedence, LHM and the LHA-Suspicion formula with an injec
 
 ## Main parameters (env var = default)
 
-`N=5`, `K=2` (≤ N − 2), `N_CONSEC=3`, `LATENESS_FACTOR=1.1`, `JITTER_THRESHOLD=0.10`, `LHM_MAX=8`, `BASE_PROBE_TIMEOUT=0.5`, `PROBE_INTERVAL=1.0`, `ALPHA=5`, `BETA=6` (use 2, 2 for faster detection), `K_CONFIRM=3`, `GOSSIP_LAMBDA=3`, `GOSSIP_MAX=6`, `COMPUTE_MS=100`, `COMPUTE_MODE=work` (calibrated CPU work; `sleep` for local runs), `STEPS=300`. The full list is the `Config` dataclass in `src/node.py`.
+`N=5`, `K=2` (≤ N − 2), `N_CONSEC=3`, `LATENESS_FACTOR=1.1`, `JITTER_THRESHOLD=0.10`, `LHM_MAX=8`, `BASE_PROBE_TIMEOUT=0.5`, `PROBE_INTERVAL=1.0`, `ALPHA=5`, `BETA=6` (use 2, 2 for faster detection), `K_CONFIRM=3`, `GOSSIP_LAMBDA=3`, `GOSSIP_MAX=6`, `COMPUTE_MS=100`, `COMPUTE_MODE=work` (calibrated CPU work; `sleep` for local runs), `STEPS=300`, `LOG_EVERY=25` (console status line interval; 0 = events only). The full list is the `Config` dataclass in `src/node.py`.
