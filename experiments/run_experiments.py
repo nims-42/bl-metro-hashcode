@@ -75,13 +75,24 @@ def scenarios(n, steps):
         "jitter_only": {"faults": [], "env": {"JITTER_MS": "30"}},
         "slow_accuser": {"faults": [
             {"node": target, "type": "compute", "delay_ms": 150, "start_step": start},
-            {"node": (target + 1) % n, "type": "compute", "delay_ms": 75, "start_step": start}]},
+            # Slower than the ring but faster than gpu2: hidden behind it, costs
+            # nothing while gpu2 is slower, so it is not expected to be accused.
+            {"node": (target + 1) % n, "type": "compute", "delay_ms": 75, "start_step": start,
+             "hidden_behind": node_name(target)}]},
         "cpu_limit": {"docker_only": True, "faults": [
             {"node": target, "type": "cpus", "cpus": 0.25, "start_after_s": 15.0}]},
         "per_node_compute": {
             "node_env": {i: {"COMPUTE_MS": str(ms)} for i, ms in compute_ms.items()},
             "faults": [{"node": target, "type": "compute", "inject": False, "start_step": 0,
                         "delay_ms": compute_ms[target] - min(compute_ms.values())}]},
+        # The WSL demo: healthy nodes compute at different speeds, and the two
+        # after the straggler are faster than the rest. Neither may be accused,
+        # and the straggler's cost must not include its successor being fast.
+        "uneven_compute_fault": {
+            "node_env": {(target + 1) % n: {"COMPUTE_MS": "80"},
+                         (target + 2) % n: {"COMPUTE_MS": "60"}},
+            "faults": [{"node": target, "type": "compute", "delay_ms": 100,
+                        "start_step": start}]},
     }
 
 
@@ -275,34 +286,99 @@ def failed_views(logs):
 
 
 # --- Cost of a straggler ---------------------------------------------------------------
-# The straggler's successor logs pred_lag: the time the whole ring lost to the
-# straggler on that step. Their running sum since the slowdown began is the job
-# time lost to it (slow_impact); GPU time lost is N times that. Given a one-off
-# action cost R (drop or replace the node), acting pays off from the first step
-# where slow_impact >= R: FALCON's ski-rental rule, never more than 2x the best
-# choice made in hindsight. Measured after the run; nothing here acts.
+# Per-step cost = how much longer the step took because of the straggler, i.e.
+# how far it finished behind the slowest other node. Two measurements:
+#
+#   step_time: step_t(s) - (max other compute_t(s) + normal communication time),
+#              the normal communication time taken from healthy steps before the
+#              onset. The direct definition, and the one used when such a
+#              baseline exists.
+#   pred_lag:  the successor's pred_lag minus how much faster the successor was
+#              than the slowest other node,
+#                max(0, pred_lag_succ(s) - max(0, max other compute_t(s) - compute_t_succ(s))).
+#              Needs no baseline (used for nodes slow from the start), but
+#              undercounts slow links by ~1/4: part of a link's delay comes back
+#              around the ring to the straggler and is cancelled as inherited.
+#
+# slow_impact = running sum of the per-step cost since the slowdown began (job
+# time lost); GPU time lost is N times that. Given a one-off action cost R (drop
+# or replace the node), acting pays off from the first step where
+# slow_impact >= R: FALCON's ski-rental rule, never more than 2x the best choice
+# made in hindsight. Measured after the run; nothing here acts.
+
+def steps_by_node(logs):
+    rows = {}
+    for node, records in logs.items():
+        for r in records:
+            rows.setdefault(r["step"], {})[node] = r
+    return rows
+
+
+def pred_lag_costs(logs, about, n, onset):
+    """[(step, cost)] from `onset` on, from the successor's pred_lag."""
+    succ = node_name((node_index(about) + 1) % n)
+    out = []
+    for step, nodes in sorted(steps_by_node(logs).items()):
+        if onset is None or step < onset or succ not in nodes:
+            continue
+        others = [r["compute_t"] for k, r in nodes.items() if k != about]
+        skew = max(0.0, max(others) - nodes[succ]["compute_t"]) if others else 0.0
+        out.append((step, max(0.0, nodes[succ]["pred_lag"] - skew)))
+    return out
+
+
+def step_time_costs(logs, about, onset, warmup=10):
+    """[(step, cost)] from `onset` on, from step times; None without healthy
+    steps before the onset to learn the normal communication time from."""
+    rows = steps_by_node(logs)
+    full = len(logs)
+
+    def comm(nodes):
+        return (statistics.median(r["step_t"] for r in nodes.values())
+                - max(r["compute_t"] for r in nodes.values()))
+    healthy = [comm(nodes) for step, nodes in rows.items()
+               if onset is not None and warmup <= step < onset and len(nodes) == full]
+    if not healthy:
+        return None
+    base = statistics.median(healthy)
+    out = []
+    for step, nodes in sorted(rows.items()):
+        if step < onset or about not in nodes or len(nodes) < full:
+            continue
+        others = max(r["compute_t"] for k, r in nodes.items() if k != about)
+        step_t = statistics.median(r["step_t"] for r in nodes.values())
+        out.append((step, step_t - (others + base)))
+    return out
+
 
 def straggler_cost(logs, about, n, onset, confirm_step, action_cost):
-    succ = node_name((node_index(about) + 1) % n)
-    lags = sorted((r["step"], r["pred_lag"]) for r in logs.get(succ, [])
-                  if onset is not None and r["step"] >= onset)
-    cost = {"onset_step": onset, "cost_measured_by": succ, "cost_per_step_s": None,
+    by_lag = pred_lag_costs(logs, about, n, onset)
+    by_time = step_time_costs(logs, about, onset)
+    costs = by_time if by_time else by_lag
+    cost = {"onset_step": onset, "cost_method": "step_time" if by_time else "pred_lag",
+            "cost_per_step_s": None,
+            "cost_per_step_step_time_s": (round(statistics.median(c for _, c in by_time), 4)
+                                          if by_time else None),
+            "cost_per_step_pred_lag_s": (round(statistics.median(c for _, c in by_lag), 4)
+                                         if by_lag else None),
             "slow_impact_at_confirm_s": None, "gpu_s_at_confirm": None,
             "slow_impact_total_s": None, "gpu_s_total": None,
             "action_cost_s": action_cost, "act_at_step": None}
-    if not lags:
+    if not costs:
         return cost
     running, at_confirm = 0.0, None
-    for step, lag in lags:
-        running += lag
+    for step, c in costs:
+        running += c
         if confirm_step is not None and step <= confirm_step:
             at_confirm = running
         if action_cost is not None and cost["act_at_step"] is None and running >= action_cost:
             cost["act_at_step"] = step
-    cost["cost_per_step_s"] = round(statistics.median(lag for _, lag in lags), 4)
+    running = max(0.0, running)
+    cost["cost_per_step_s"] = round(max(0.0, statistics.median(c for _, c in costs)), 4)
     cost["slow_impact_total_s"] = round(running, 3)
     cost["gpu_s_total"] = round(n * running, 1)
     if at_confirm is not None:
+        at_confirm = max(0.0, at_confirm)
         cost["slow_impact_at_confirm_s"] = round(at_confirm, 3)
         cost["gpu_s_at_confirm"] = round(n * at_confirm, 1)
     return cost
@@ -435,6 +511,7 @@ def summarize(run_id, action_cost=None, r_percentile=50):
             "class": confirm[2].get("class") if confirm else None,
         }
         row["class_correct"] = row["class"] == row["expected_class"] if confirm else None
+        row["hidden_behind"] = fault.get("hidden_behind")
         for key, ev in (("suspect", raised), ("confirm", confirm)):
             row[f"{key}_latency_steps"] = ev[1] - start_step if ev and start_step is not None else None
             row[f"{key}_latency_s"] = round(ev[0] - start_ts, 3) if ev and start_ts else None
@@ -561,14 +638,17 @@ def print_summary(s):
         status = (f"detected by {d['detected_by']} as {d['class']} "
                   f"({'correct' if d['class_correct'] else 'WRONG'} class), "
                   f"confirm after {d['confirm_latency_steps']} steps / {d['confirm_latency_s']} s, "
-                  f"everyone after {d['full_dissemination_s']} s") if d["detected"] else "NOT detected"
+                  f"everyone after {d['full_dissemination_s']} s") if d["detected"] else (
+            f"not accused, as expected: hidden behind {d['hidden_behind']}"
+            if d.get("hidden_behind") else "NOT detected")
         print(f"  {d['node']} {d['fault']} fault: {status}")
         if d.get("slow_impact_total_s") is not None:
             at_confirm = (f"{d['slow_impact_at_confirm_s']} s ({d['gpu_s_at_confirm']} GPU-s) "
                           f"by confirm" if d["slow_impact_at_confirm_s"] is not None
                           else "never confirmed")
             line = (f"    cost: {d['cost_per_step_s']} s/step from step {d['onset_step']} "
-                    f"(measured by {d['cost_measured_by']}); {at_confirm}, "
+                    f"(by {d['cost_method']}; step time {d['cost_per_step_step_time_s']}, "
+                    f"pred_lag {d['cost_per_step_pred_lag_s']}); {at_confirm}, "
                     f"{d['slow_impact_total_s']} s ({d['gpu_s_total']} GPU-s) by the end")
             if d["action_cost_s"] is not None:
                 line += (f"; with R = {d['action_cost_s']} s act at step {d['act_at_step']}"
