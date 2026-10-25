@@ -37,6 +37,10 @@ def node_name(i):
     return f"gpu{i}"
 
 
+def node_index(name):
+    return int(name[3:])
+
+
 # --- Scenarios (section 8) -------------------------------------------------------
 # Each fault: node offset from the default target (N // 2), type, delay, steps.
 # "compute" and "network" faults are injected by the node itself (sleep on the
@@ -175,7 +179,7 @@ def apply_cpu_limit(run_id, fault, ground_truth):
     ground_truth["faults_applied"].append(dict(fault))
 
 
-def run_scenario(name, n, steps, local, overrides, run_id=None):
+def run_scenario(name, n, steps, local, overrides, run_id=None, action_cost=None):
     scenario = scenarios(n, steps)[name]
     if scenario.get("docker_only") and local:
         print(f"skipping {name}: needs Docker")
@@ -204,7 +208,7 @@ def run_scenario(name, n, steps, local, overrides, run_id=None):
             if g["node"] == node_name(f["node"]) and g["type"] == f["type"]:
                 g["start_ts"] = f["start_ts"]
     save_json(os.path.join(run_dir, "ground_truth.json"), ground_truth)
-    return summarize(run_id)
+    return summarize(run_id, action_cost)
 
 
 # --- Scoring (section 9) -----------------------------------------------------------
@@ -265,7 +269,41 @@ def failed_views(logs):
     return out
 
 
-def summarize(run_id):
+# --- Cost of a straggler ---------------------------------------------------------------
+# The straggler's successor logs pred_lag: the time the whole ring lost to the
+# straggler on that step. Their running sum since the slowdown began is the job
+# time lost to it (slow_impact); GPU time lost is N times that. Given a one-off
+# action cost R (drop or replace the node), acting pays off from the first step
+# where slow_impact >= R: FALCON's ski-rental rule, never more than 2x the best
+# choice made in hindsight. Measured after the run; nothing here acts.
+
+def straggler_cost(logs, about, n, onset, confirm_step, action_cost):
+    succ = node_name((node_index(about) + 1) % n)
+    lags = sorted((r["step"], r["pred_lag"]) for r in logs.get(succ, [])
+                  if onset is not None and r["step"] >= onset)
+    cost = {"onset_step": onset, "cost_measured_by": succ, "cost_per_step_s": None,
+            "slow_impact_at_confirm_s": None, "gpu_s_at_confirm": None,
+            "slow_impact_total_s": None, "gpu_s_total": None,
+            "action_cost_s": action_cost, "act_at_step": None}
+    if not lags:
+        return cost
+    running, at_confirm = 0.0, None
+    for step, lag in lags:
+        running += lag
+        if confirm_step is not None and step <= confirm_step:
+            at_confirm = running
+        if action_cost is not None and cost["act_at_step"] is None and running >= action_cost:
+            cost["act_at_step"] = step
+    cost["cost_per_step_s"] = round(statistics.median(lag for _, lag in lags), 4)
+    cost["slow_impact_total_s"] = round(running, 3)
+    cost["gpu_s_total"] = round(n * running, 1)
+    if at_confirm is not None:
+        cost["slow_impact_at_confirm_s"] = round(at_confirm, 3)
+        cost["gpu_s_at_confirm"] = round(n * at_confirm, 1)
+    return cost
+
+
+def summarize(run_id, action_cost=None):
     run_dir = os.path.join(RESULTS, run_id)
     gt = load_json(os.path.join(run_dir, "ground_truth.json"))
     n = gt["n"]
@@ -295,6 +333,11 @@ def summarize(run_id):
             row[f"{key}_latency_s"] = round(ev[0] - start_ts, 3) if ev and start_ts else None
         row["full_dissemination_steps"] = full[0] - start_step if full and start_step is not None else None
         row["full_dissemination_s"] = round(full[1] - start_ts, 3) if full and start_ts else None
+        # The slowdown began where the accuser's late streak began; if it was
+        # never suspected, at the injected start (the cost of missing it).
+        onset = raised[2]["window"][0] if raised and raised[2].get("window") else start_step
+        row.update(straggler_cost(logs, about, n, onset, confirm[1] if confirm else None,
+                                  action_cost))
         detections.append(row)
 
     fp = [(o, a) for o, v in views.items() for a in v if a in healthy]
@@ -400,6 +443,18 @@ def print_summary(s):
                   f"confirm after {d['confirm_latency_steps']} steps / {d['confirm_latency_s']} s, "
                   f"everyone after {d['full_dissemination_s']} s") if d["detected"] else "NOT detected"
         print(f"  {d['node']} {d['fault']} fault: {status}")
+        if d.get("slow_impact_total_s") is not None:
+            at_confirm = (f"{d['slow_impact_at_confirm_s']} s ({d['gpu_s_at_confirm']} GPU-s) "
+                          f"by confirm" if d["slow_impact_at_confirm_s"] is not None
+                          else "never confirmed")
+            line = (f"    cost: {d['cost_per_step_s']} s/step from step {d['onset_step']} "
+                    f"(measured by {d['cost_measured_by']}); {at_confirm}, "
+                    f"{d['slow_impact_total_s']} s ({d['gpu_s_total']} GPU-s) by the end")
+            if d["action_cost_s"] is not None:
+                line += (f"; with R = {d['action_cost_s']} s act at step {d['act_at_step']}"
+                         if d["act_at_step"] is not None
+                         else f"; with R = {d['action_cost_s']} s never act (waiting was cheaper)")
+            print(line)
     print(f"  false positives: {s['false_positives']} (at healthy observers: "
           f"{s['false_positives_at_healthy']}), jitter streaks ignored: {s['jitter_ignored']}, "
           f"suspicions dropped: {s['suspicions_dropped']}")
@@ -424,6 +479,10 @@ def main(argv=None):
                        help="node parameter override, e.g. --set ALPHA=2 --set BETA=2")
     p = sub.add_parser("summarize")
     p.add_argument("run_id")
+    for name in ("run", "all", "summarize"):
+        sub.choices[name].add_argument(
+            "--action-cost", type=float, metavar="R",
+            help="one-off cost of acting on a straggler, in seconds; reports when acting pays off")
     args = parser.parse_args(argv)
 
     if args.cmd == "list":
@@ -431,7 +490,7 @@ def main(argv=None):
             print(f"{name:15s} faults={sc['faults']} env={sc.get('env', {})}")
         return
     if args.cmd == "summarize":
-        print_summary(summarize(args.run_id))
+        print_summary(summarize(args.run_id, args.action_cost))
         return
     if args.n < 3:
         parser.error("--n must be at least 3")
@@ -440,10 +499,11 @@ def main(argv=None):
         if args.scenario not in scenarios(args.n, args.steps):
             parser.error(f"unknown scenario {args.scenario!r}")
         print_summary(run_scenario(args.scenario, args.n, args.steps, args.local, overrides,
-                                   args.run_id))
+                                   args.run_id, args.action_cost))
     elif args.cmd == "all":
         for name in scenarios(args.n, args.steps):
-            print_summary(run_scenario(name, args.n, args.steps, args.local, overrides))
+            print_summary(run_scenario(name, args.n, args.steps, args.local, overrides,
+                                       action_cost=args.action_cost))
     elif args.cmd == "overhead":
         print(json.dumps(overhead(args.n, args.steps, args.local, overrides), indent=2))
 
