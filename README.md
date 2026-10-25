@@ -94,6 +94,57 @@ Each run writes these files to `results/<run_id>/`:
 - `gpu<i>.jsonl`: one line per step with `compute_t`, `wait_t`, `pred_lag`, `step_t`, `lhm`, message counters, `member_states`, `events` (`SUSPECT_RAISED`, `PING_REQ_RESULT`, `SUSPECT`, `REFUTE`, `CONFIRM`, `JITTER_IGNORED`, `FAULT_START`, …) and `chunk_lags`. This is the data the deferred dashboard will read.
 - `ground_truth.json`: the scenario, which node, which fault, and when.
 - `summary.json` / `summary.csv`: per fault, whether it was detected, by whom, the class and whether it is correct, latency to suspect and to confirm (steps and seconds), and time to full dissemination. Also false positives (FP, and FP- for those seen by healthy observers), jitter streaks ignored, ping-reqs against ring frames, median step time before and during the fault, and max LHM.
+- `results/history.csv`: one row per scored run (ring formation time, state and chunk sizes, bandwidth, healthy step time), used to estimate R below.
+
+## Cost of a straggler
+
+Computed after the run from the logs. Nothing acts on it: dropping, rebalancing and restarting are out of scope (CONTEXT.md §6.6).
+
+```
+pred_lag_succ(s) = time the whole ring lost to the straggler on step s, measured by its successor
+slow_impact(k)   = Σ pred_lag_succ(s) over the k steps since the slowdown began   (job time lost)
+GPU time lost    = N · slow_impact
+act once slow_impact ≥ R                                                           (R = one-off cost of acting)
+```
+
+The rule is FALCON's ski-rental heuristic: acting once the waiting cost has reached R never costs more than 2× the best choice made in hindsight, whatever the slowdown's duration. If R is off from the truth by a factor x, the bound becomes `1 + max(x, 1/x)`.
+
+**Per detection** in `summary.json` / `summary.csv`:
+
+| Field | Meaning |
+|---|---|
+| `onset_step` | When the slowdown began: the start of the accuser's late streak, or the injected start if it was never suspected |
+| `cost_measured_by` | The straggler's successor, whose `pred_lag` is summed |
+| `cost_per_step_s` | Median per-step loss |
+| `slow_impact_at_confirm_s`, `gpu_s_at_confirm` | What detection itself cost |
+| `slow_impact_total_s`, `gpu_s_total` | What the straggler cost over the whole run |
+| `action_cost_s`, `action_cost_source` | R and where it came from |
+| `act_at_step` | First step where acting would have paid off (`null`: waiting was cheaper) |
+
+**Choosing R:** pass `--action-cost 5` for a fixed R, or `--action-cost auto` to estimate it for "drop the node and re-form the ring":
+
+```
+R = T_ring    past ring formation time at the same mode and N (median; --r-percentile 90 to be cautious)
+  + T_state   state bytes / this run's effective all-reduce bandwidth
+  + T_warmup  warmup steps x this run's healthy step time
+```
+
+- `T_ring` comes from the `RING_UP` event each node logs at startup. Per run it takes the **smallest** value across nodes: the last node to start waits least, which is closest to re-forming a ring whose members are all running.
+- With no history at that N, the nearest N is used; with no history at all, the run's own figures.
+- Runs from before `RING_UP` was added are left out of history.
+- The summary prints the breakdown, e.g. `R = 1.562 s = ring 0.2944 + state 0.0046 + warmup 1.263 (ring time: p50 of 1 previous docker run(s) at N=5)`.
+
+```bash
+python experiments/run_experiments.py run compute_fault --action-cost auto
+python experiments/run_experiments.py summarize <run_id> --action-cost 5
+```
+
+**Assumptions:**
+1. Training is synchronous.
+2. There is one straggler, and its successor isn't also slow (in `slow_accuser`, the cost is understated).
+3. Acting costs R once and fully removes the slowdown.
+
+**What R doesn't cover:** rebalancing (FALCON S2, R ≈ 0) and checkpoint/restart (needs checkpoint size and disk speed). The bandwidth is "effective", dominated by latency with our small chunks.
 
 ## Tests
 

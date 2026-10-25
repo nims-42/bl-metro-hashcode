@@ -78,11 +78,20 @@ Tick a box when the task is done and committed.
 - [x] Console output is best-effort (a closed stdout never stops a node)
 - [x] Per-node processing time: `per_node_compute` scenario, `--set gpu<i>.KEY=VALUE`, `GPU<i>_COMPUTE_MS` in `compose.yaml`
 
+## 12. Cost of a straggler (after the run)
+- [x] `slow_impact` = running sum of the successor's `pred_lag` since onset; GPU time = N × that
+- [x] `--action-cost R`: first step where acting pays off (FALCON ski-rental rule)
+- [x] `RING_UP` event (connect and calibration time, state and chunk bytes, warmup steps) and `steps` on every JSONL line
+- [x] `results/history.csv` and `--action-cost auto` (R = past ring formation + state transfer + warmup)
+- [ ] Live version: carry the running cost in `CONFIRM` events (needed before any automatic mitigation)
+- [ ] Measure R for real once a drop/rebalance exists, and replace the estimate with observed costs
+
 ## Open findings from the first runs
 - [ ] `slow_accuser`: when the straggler's successor is also slow, the self-check holds its accusation and only the successor observes the straggler directly. Under `--local` the original straggler is never caught; under Docker it was caught only after ~46 s (its slow successor is caught in ~8 s). Decide whether a peer may raise a suspicion from telemetry alone.
 - [ ] Detection takes ~8 s at N = 5 with α = 5, β = 6 (suspicion timeout). Try α = β = 2 and re-measure false positives under jitter.
 - [ ] Under Docker, host noise briefly suspects healthy nodes (1 per 300-step healthy run, 7 under 30 ms jitter); all were refuted before the timeout. Watch this when scaling N.
 - [ ] Under Docker, measured compute is ~20–35% above `COMPUTE_MS` (calibrated on an idle core). Fine for relative demos; recalibrate if absolute numbers matter.
+- [ ] With auto R ≈ 1.1–1.6 s (N = 5), acting would pay off ~10–15 steps after onset, before the ~27–37-step confirmation. Detection latency, not R, now dominates the cost of a straggler.
 - [ ] A confirmed straggler stays `Failed` after its fault ends (CONFIRM is final in SWIM). Decide on recovery once mitigation is in scope.
 - [ ] Reconcile with the `nims/skeleton` branch, which uses a different layout (`swim_straggler/`).
 
