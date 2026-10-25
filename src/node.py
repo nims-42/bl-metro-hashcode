@@ -449,11 +449,22 @@ def run(cfg):
     swim = build_swim(cfg, metrics, request_fn=request, rng=random.Random(cfg.seed + cfg.node_id))
     server = PingServer(cfg, swim.handle_ping_req)
     ring = TcpRing(cfg)
+    t0 = time.monotonic()
     ring.connect()
+    connect_s = time.monotonic() - t0
+    t0 = time.monotonic()
     trainer = Trainer(cfg, rng)
+    calibrate_s = time.monotonic() - t0
+    # What re-forming the ring would cost, for estimating the cost of acting on
+    # a straggler after the run. Written only; nothing here reads it back.
+    itemsize = np.dtype(msg.CHUNK_DTYPE).itemsize
+    metrics.event("RING_UP", cfg.name, from_=cfg.name, connect_s=round(connect_s, 4),
+                  calibrate_s=round(calibrate_s, 4), state_bytes=cfg.grad_dim * itemsize,
+                  chunk_bytes=-(-cfg.grad_dim // cfg.n) * itemsize,
+                  warmup_steps=cfg.warmup_steps)
     planned = (f", fault {cfg.fault_type} {cfg.fault_delay_ms:g} ms from step "
                f"{cfg.fault_start_step}" if cfg.fault_at(cfg.fault_start_step) else "")
-    say(f"[{cfg.name}] ring up: pred {swim.pred}, succ {swim.succ}, compute "
+    say(f"[{cfg.name}] ring up in {connect_s:.2f} s: pred {swim.pred}, succ {swim.succ}, compute "
         f"{cfg.compute_ms:g} ms ({cfg.compute_mode}){planned}")
     clock = time.monotonic
     prev_wait = 0.0
@@ -499,7 +510,7 @@ def run(cfg):
             swim.end_step(step, compute_t, wait_t, pred_lag, step_t)
             states, lhm = swim.snapshot()
             record = metrics.write_step(step, compute_t, wait_t, pred_lag, step_t, lhm, states,
-                                        fault=fault, late_streak=swim.late_streak,
+                                        fault=fault, late_streak=swim.late_streak, steps=cfg.steps,
                                         chunk_lags=[round(x, 6) for x in lags])
             log_step(cfg, record)
             prev_wait, prev_last_wait = wait_t, lags[-1]
