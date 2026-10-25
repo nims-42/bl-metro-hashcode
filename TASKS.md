@@ -86,8 +86,16 @@ Tick a box when the task is done and committed.
 - [ ] Live version: carry the running cost in `CONFIRM` events (needed before any automatic mitigation)
 - [ ] Measure R for real once a drop/rebalance exists, and replace the estimate with observed costs
 
+## 13. Fixes from the WSL demo run
+- [x] Lag explained by compute difference no longer counts (`residual_lag`): a fast node no longer accuses its normal predecessor
+- [x] Only the critical-path node is accused (`critical`, by delay score: compute excess or unexplained successor lag): a node hidden behind a bigger straggler costs nothing. A first version used "waits least", which wrongly cleared slow-link stragglers under Docker noise.
+- [x] Cost = how far the straggler finished behind the slowest *other* node; `step_time` method by default, `pred_lag` as fallback, both reported
+- [x] `uneven_compute_fault` scenario reproduces the demo; `slow_accuser` now expects gpu3 to stay hidden
+- [ ] Once mitigation exists: drop a removed node from the critical-path check so the next straggler surfaces
+- [ ] Re-run the Docker sweep with the delay-score rule: the Docker `network_fault` was missed by the wait-based first version, and the sweep with the fix was stopped before Docker ran (verified locally and by `test_slow_link_straggler_does_not_refute_while_its_link_is_slow`)
+
 ## Open findings from the first runs
-- [ ] `slow_accuser`: when the straggler's successor is also slow, the self-check holds its accusation and only the successor observes the straggler directly. Under `--local` the original straggler is never caught; under Docker it was caught only after ~46 s (its slow successor is caught in ~8 s). Decide whether a peer may raise a suspicion from telemetry alone.
+- [x] `slow_accuser`: the slow successor used to hold back its accusation and get accused itself, so the real straggler was caught late or never. Fixed by the critical-path rule: the hidden successor accuses the real straggler and is not accused itself.
 - [ ] Detection takes ~8 s at N = 5 with α = 5, β = 6 (suspicion timeout). Try α = β = 2 and re-measure false positives under jitter.
 - [ ] Under Docker, host noise briefly suspects healthy nodes (1 per 300-step healthy run, 7 under 30 ms jitter); all were refuted before the timeout. Watch this when scaling N.
 - [ ] Under Docker, measured compute is ~20–35% above `COMPUTE_MS` (calibrated on an idle core). Fine for relative demos; recalibrate if absolute numbers matter.

@@ -21,8 +21,10 @@ The full design is in `CONTEXT.md` and the build status is in `TASKS.md`.
 ## How a straggler is found
 
 - **Signal.** For every received chunk, a node records how long it was blocked on it. The sender's header carries `fwd_wait`, how long the sender itself was blocked just before forwarding that chunk. `pred_lag = Σ max(0, my_wait − fwd_wait)` is the lag that **originates at the predecessor**. Delay inherited from further up the ring cancels out, so only the successor of a slow GPU or a slow link sees a large `pred_lag`. No clocks are compared across nodes.
-- **Lateness (FALCON).** The predecessor is late in a step if its `pred_lag` or its reported `compute_t` is above 1.1 × the ring median and above 10% of the step time. A suspicion needs N_consec late steps in a row (scaled by LHM + 1). Step time must also have risen by at least 10%; otherwise the streak is jitter.
-- **Self-check (Lifeguard).** A node that the ring view itself implicates does not accuse anyone. It is implicated if its compute is slow, it waits least, or its own successor reports lag from it.
+- **Lateness (FALCON).** The predecessor is late in a step if its reported `compute_t`, or the part of `pred_lag` that its compute does not explain, is above 1.1 × the ring median and above 10% of the step time. A suspicion needs N_consec late steps in a row (scaled by LHM + 1). Step time must also have risen by at least 10%; otherwise the streak is jitter.
+  - **Compute skew is not lag.** If the predecessor merely computes longer than this node (because this node is fast), the wait that causes is subtracted: `residual = pred_lag − max(0, compute_pred − compute_me)`. A slow link shows up as lag beyond that.
+  - **Only the bottleneck is accused.** Each node gets a delay score: its compute beyond the ring median (a slow GPU), or the lag at its successor that its compute does not explain (a slow link), whichever is larger. The predecessor must be on the critical path: its score within the jitter floor of the highest score. A node slower than the rest but faster than another straggler is hidden behind it and costs the job nothing. (`wait_t` alone can't decide this: with a slow link every node waits about the same.)
+- **Self-check (Lifeguard).** A node that the ring view itself implicates does not accuse anyone. It is implicated if it is on the critical path and its compute is slow, it waits least, or its own successor reports lag from it that its compute does not explain. A node that is slow but hidden behind a slower one may still accuse.
 - **Confirm (SWIM).** `PING_REQ` goes to k = 2 random peers. Each answers from its own copy of the ring telemetry: agree, disagree, or `NACK` if it has no data. If a majority agrees, `SUSPECT` is gossiped and the Lifeguard suspicion timer starts, already shortened by the agreeing peers. If the suspected node's own view clears it, it refutes with a higher incarnation. Otherwise the timer ends in `CONFIRM` with the class. If peers disagree, the suspicion is dropped and the accuser's LHM goes up.
 - **Recovery.** While suspected, a node re-runs its self-check every step. Once N_consec steps in a row no longer implicate it, it refutes with a higher incarnation, so a brief slowdown is cleared before the suspicion times out.
 - **Class (FALCON).** If the suspect's `compute_t` is slow it is a **compute** straggler; otherwise it is a **network** straggler.
@@ -53,7 +55,9 @@ python experiments/run_experiments.py run no_fault --set gpu2.COMPUTE_MS=250    
 
 `run_experiments.py` writes a compose file for any `--n` to `results/<run_id>/compose.generated.yaml`, so scaling up needs no edits to `compose.yaml`.
 
-Scenarios: `no_fault`, `compute_fault`, `network_fault` (sleep on the send path), `jitter_only` (0–30 ms random extra compute on every node), `slow_accuser` (the straggler's successor is slow as well), `cpu_limit` (`docker update --cpus`, Docker only), and `per_node_compute` (every node has its own processing time from the start: 100, 110, 200, 105 and 90 ms at N = 5; only the 200 ms node should be flagged).
+Scenarios: `no_fault`, `compute_fault`, `network_fault` (sleep on the send path), `jitter_only` (0–30 ms random extra compute on every node), `slow_accuser` (the straggler's successor is slow as well), `cpu_limit` (`docker update --cpus`, Docker only), `per_node_compute` (every node has its own processing time from the start: 100, 110, 200, 105 and 90 ms at N = 5; only the 200 ms node should be flagged), and `uneven_compute_fault` (a compute fault on gpu2 while gpu3 and gpu4 compute faster than the rest, 80 and 60 ms; only gpu2 should be flagged).
+
+In `slow_accuser`, gpu3 (+75 ms) is hidden behind gpu2 (+150 ms). It is not expected to be accused, because it costs nothing while gpu2 is slower; the summary reports it as "not accused, as expected".
 
 `--set KEY=VALUE` applies to every node; `--set gpu2.KEY=VALUE` applies to gpu2 only and wins.
 
@@ -101,11 +105,20 @@ Each run writes these files to `results/<run_id>/`:
 Computed after the run from the logs. Nothing acts on it: dropping, rebalancing and restarting are out of scope (CONTEXT.md §6.6).
 
 ```
-pred_lag_succ(s) = time the whole ring lost to the straggler on step s, measured by its successor
-slow_impact(k)   = Σ pred_lag_succ(s) over the k steps since the slowdown began   (job time lost)
-GPU time lost    = N · slow_impact
-act once slow_impact ≥ R                                                           (R = one-off cost of acting)
+cost(s)        = how much longer step s took because of the straggler
+slow_impact(k) = Σ cost(s) over the k steps since the slowdown began   (job time lost)
+GPU time lost  = N · slow_impact
+act once slow_impact ≥ R                                             (R = one-off cost of acting)
 ```
+
+`cost(s)` is measured in two ways, both from data already in the logs:
+
+| Method | Formula | Used when |
+|---|---|---|
+| `step_time` | `step_t(s) − (max other compute_t(s) + normal communication time)`, the normal communication time taken from healthy steps before the onset | A healthy baseline exists (the default) |
+| `pred_lag` | `max(0, pred_lag_succ(s) − max(0, max other compute_t(s) − compute_t_succ(s)))` | The node was slow from the start, so there is no baseline |
+
+Both measure how far the straggler finished behind the **slowest other node**, not behind its successor. A fast successor would otherwise inflate the cost, and a straggler hidden behind a slower one correctly costs about 0. They agree within a few percent for compute stragglers. For slow links, `pred_lag` undercounts by about a quarter: part of a link's delay comes back around the ring to the straggler itself and is cancelled as inherited. Both values are reported.
 
 The rule is FALCON's ski-rental heuristic: acting once the waiting cost has reached R never costs more than 2× the best choice made in hindsight, whatever the slowdown's duration. If R is off from the truth by a factor x, the bound becomes `1 + max(x, 1/x)`.
 
@@ -114,8 +127,10 @@ The rule is FALCON's ski-rental heuristic: acting once the waiting cost has reac
 | Field | Meaning |
 |---|---|
 | `onset_step` | When the slowdown began: the start of the accuser's late streak, or the injected start if it was never suspected |
-| `cost_measured_by` | The straggler's successor, whose `pred_lag` is summed |
-| `cost_per_step_s` | Median per-step loss |
+| `cost_method` | `step_time` or `pred_lag` (see above) |
+| `cost_per_step_s` | Median per-step cost, by `cost_method` |
+| `cost_per_step_step_time_s`, `cost_per_step_pred_lag_s` | Both measurements, for comparison |
+| `hidden_behind` | For a fault not expected to be accused (hidden behind a slower node) |
 | `slow_impact_at_confirm_s`, `gpu_s_at_confirm` | What detection itself cost |
 | `slow_impact_total_s`, `gpu_s_total` | What the straggler cost over the whole run |
 | `action_cost_s`, `action_cost_source` | R and where it came from |
@@ -141,7 +156,7 @@ python experiments/run_experiments.py summarize <run_id> --action-cost 5
 
 **Assumptions:**
 1. Training is synchronous.
-2. There is one straggler, and its successor isn't also slow (in `slow_accuser`, the cost is understated).
+2. With several slow nodes, each one's cost is its marginal cost: how far it finishes behind the slowest *other* node. A hidden straggler costs about 0 until the bigger one is removed.
 3. Acting costs R once and fully removes the slowdown.
 
 **What R doesn't cover:** rebalancing (FALCON S2, R ≈ 0) and checkpoint/restart (needs checkpoint size and disk speed). The bandwidth is "effective", dominated by latency with our small chunks.
