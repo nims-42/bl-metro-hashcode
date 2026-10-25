@@ -277,16 +277,21 @@ class Swim:
             self._maybe_suspect(step)
 
     def is_pred_late(self, pred_lag):
-        """Lateness rule (6.1): the predecessor's lag, or its compute_t, is
-        above 1.1x the ring median and clears the 10% jitter floor."""
+        """Lateness rule (6.1): the predecessor's compute_t, or the part of
+        my lag its compute does not explain, is above 1.1x the ring median
+        and clears the 10% jitter floor; and the predecessor is on the
+        critical path, not itself waiting on a slower node."""
         floor = self._floor()
-        lags = self.view.latest("pred_lag")
-        lags[self.self_id] = pred_lag
-        computes = self.view.latest("compute_t")
+        stats = {f: self.view.latest(f) for f in RingView.FIELDS}
+        stats["pred_lag"][self.self_id] = pred_lag
+        lags, computes = stats["pred_lag"], stats["compute_t"]
         if len(lags) < self._quorum or self.pred not in computes:
             return False
+        if not self.lifeguard.critical(stats, self.pred, self.ids, floor):
+            return False
         factor = self.lifeguard.factor
-        lag_late = exceeds(pred_lag, statistics.median(lags.values()), factor, floor)
+        residual = self.lifeguard.residual_lag(stats, self.pred, self.self_id)
+        lag_late = exceeds(residual, statistics.median(lags.values()), factor, floor)
         compute_late = exceeds(computes[self.pred], statistics.median(computes.values()),
                                factor, floor)
         return lag_late or compute_late
@@ -420,8 +425,7 @@ class Swim:
             if not window:
                 return msg.nack(about, self.self_id, "no data")
             floor = self._floor()
-            succ = self.succ_of(about)
-            late = [self.lifeguard.implicated(s, about, succ, floor) for s in window]
+            late = [self.lifeguard.implicated(s, about, self.ids, floor) for s in window]
             agree = sum(late) * 2 >= len(late)
             evidence = {"steps": len(window), "late_steps": sum(late),
                         "class": self.lifeguard.classify(window, about, floor)}
@@ -432,9 +436,6 @@ class Swim:
         if not self._step_times:
             return 0.0
         return self.lifeguard.jitter_floor(statistics.median(self._step_times))
-
-    def succ_of(self, node):
-        return self.ids[(self.ids.index(node) + 1) % self.n]
 
     def _window_stats(self, window):
         """Whatever this node has for the steps in `window`, covered or not."""
@@ -460,7 +461,7 @@ class Swim:
         if not recent:
             return False
         floor = self._floor()
-        votes = sum(self.lifeguard.is_self_outlier(s, self.self_id, self.succ, floor)
+        votes = sum(self.lifeguard.is_self_outlier(s, self.self_id, self.ids, floor)
                     for s in recent)
         return votes * 2 > len(recent)
 
@@ -470,7 +471,7 @@ class Swim:
         if len(recent) < self.cfg.n_consec:
             return False
         floor = self._floor()
-        return not any(self.lifeguard.is_self_outlier(s, self.self_id, self.succ, floor)
+        return not any(self.lifeguard.is_self_outlier(s, self.self_id, self.ids, floor)
                        for s in recent)
 
     def snapshot(self):

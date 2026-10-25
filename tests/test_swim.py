@@ -180,6 +180,68 @@ def test_small_lag_under_the_jitter_floor_is_not_late():
     assert swim.late_streak == 0
 
 
+# The WSL demo run: gpu2 slow, healthy nodes' compute uneven, gpu4 fastest.
+DEMO = dict(step_t=0.30,
+            compute={"gpu0": 0.180, "gpu1": 0.178, "gpu2": 0.285, "gpu3": 0.185, "gpu4": 0.133},
+            wait={"gpu0": 0.110, "gpu1": 0.170, "gpu2": 0.007, "gpu3": 0.100, "gpu4": 0.170},
+            lag={"gpu0": 0.001, "gpu1": 0.003, "gpu2": 0.001, "gpu3": 0.100, "gpu4": 0.047})
+
+
+def test_fast_successor_does_not_accuse_a_normal_predecessor():
+    swim, metrics, _ = make_swim(me=4, request_fn=agree_all)    # pred is gpu3
+    quiet(swim, range(10))
+    for s in range(10, 40):
+        feed(swim, s, **DEMO)
+    assert swim.late_streak == 0
+    assert not events(metrics, "SUSPECT_RAISED")
+
+
+def test_successor_of_the_real_straggler_still_accuses_it():
+    swim, metrics, _ = make_swim(me=3, request_fn=agree_all)    # pred is gpu2
+    quiet(swim, range(10))
+    for s in range(10, 13):
+        feed(swim, s, **DEMO)
+    raised = events(metrics, "SUSPECT_RAISED")
+    assert [e["about"] for e in raised] == ["gpu2"] and raised[0]["class"] == "compute"
+
+
+def test_slow_node_hidden_behind_a_slower_one_is_not_accused():
+    hidden = dict(step_t=0.26,
+                  compute={"gpu0": 0.10, "gpu1": 0.10, "gpu2": 0.25, "gpu3": 0.175, "gpu4": 0.10},
+                  wait={"gpu0": 0.15, "gpu1": 0.15, "gpu2": 0.0, "gpu3": 0.075, "gpu4": 0.15},
+                  lag={"gpu3": 0.075, "gpu4": 0.075})
+    swim, metrics, _ = make_swim(me=4, request_fn=agree_all)    # pred is gpu3
+    quiet(swim, range(10))
+    for s in range(10, 40):
+        feed(swim, s, **hidden)
+    assert not events(metrics, "SUSPECT_RAISED")
+    accuser, metrics3, _ = make_swim(me=3, request_fn=agree_all)  # slow, but not the bottleneck
+    quiet(accuser, range(10))
+    for s in range(10, 13):
+        feed(accuser, s, **hidden)
+    assert not events(metrics3, "ACCUSATION_HELD")
+    assert [e["about"] for e in events(metrics3, "SUSPECT_RAISED")] == ["gpu2"]
+
+
+def test_slow_link_straggler_does_not_refute_while_its_link_is_slow():
+    # Every node waits about the same in a network fault; gpu2 must still see
+    # itself implicated through gpu3's unexplained lag, and not refute.
+    link = dict(step_t=0.27, compute={f"gpu{i}": 0.10 for i in range(5)},
+                wait={"gpu0": 0.125, "gpu1": 0.117, "gpu2": 0.123, "gpu3": 0.105, "gpu4": 0.108},
+                lag={"gpu0": 0.002, "gpu1": 0.001, "gpu2": 0.001, "gpu3": 0.075, "gpu4": 0.002})
+    swim, metrics, _ = make_swim(me=2)
+    quiet(swim, range(10))
+    for s in range(10, 15):
+        feed(swim, s, **link)
+    header = msg.make_header("gpu1", 15, msg.RS, 0, 0.0, 0.1, 0.0, [],
+                             [msg.gossip_update(msg.SUSPECT, "gpu2", 0, "gpu3")], 5, 6)
+    swim.on_header(header)
+    for s in range(15, 30):
+        feed(swim, s, **link)
+    assert swim.membership.state("gpu2") == SUSPECT
+    assert not events(metrics, "REFUTE")
+
+
 def test_self_check_holds_back_an_accusation_from_a_slow_node():
     swim, metrics, _ = make_swim(request_fn=agree_all)
     quiet(swim, range(10))

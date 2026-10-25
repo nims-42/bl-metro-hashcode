@@ -15,6 +15,9 @@ class FakeClock:
         return self.now
 
 
+RING = [msg.node_name(i) for i in range(5)]
+
+
 def make(n=5, clock=None, **kw):
     return Lifeguard(n, clock=clock or FakeClock(), **kw)
 
@@ -99,15 +102,15 @@ def test_exceeds_needs_both_factor_and_jitter_floor():
 def test_self_check_blocks_accusation_when_this_node_is_the_outlier():
     lg = make()
     s = stats(compute=[0.10, 0.10, 0.30, 0.10, 0.10], wait=[0.2, 0.2, 0.0, 0.2, 0.2])
-    assert lg.is_self_outlier(s, "gpu2", "gpu3", floor=0.02)
-    assert not lg.is_self_outlier(s, "gpu3", "gpu4", floor=0.02)
+    assert lg.is_self_outlier(s, "gpu2", RING, floor=0.02)
+    assert not lg.is_self_outlier(s, "gpu3", RING, floor=0.02)
 
 
 def test_self_check_flags_the_node_that_waits_least():
     lg = make()
     s = stats(compute=[0.1] * 5, wait=[0.20, 0.21, 0.01, 0.19, 0.20])
     assert lg.waits_least(s, "gpu2", floor=0.02)
-    assert lg.is_self_outlier(s, "gpu2", "gpu3", floor=0.02)
+    assert lg.is_self_outlier(s, "gpu2", RING, floor=0.02)
     assert not lg.waits_least(s, "gpu3", floor=0.02)
 
 
@@ -115,9 +118,51 @@ def test_self_check_flags_a_node_whose_successor_reports_lag_from_it():
     lg = make()
     s = stats(compute=[0.1] * 5, wait=[0.1] * 5)
     s["pred_lag"] = {"gpu0": 0.0, "gpu1": 0.0, "gpu2": 0.0, "gpu3": 0.075, "gpu4": 0.001}
-    assert lg.lag_from(s, "gpu3", floor=0.02)
-    assert lg.implicated(s, "gpu2", "gpu3", floor=0.02)
-    assert not lg.implicated(s, "gpu3", "gpu4", floor=0.02)
+    assert lg.lag_from(s, "gpu2", "gpu3", floor=0.02)
+    assert lg.implicated(s, "gpu2", RING, floor=0.02)
+    assert not lg.implicated(s, "gpu3", RING, floor=0.02)
+
+
+def test_lag_explained_by_compute_difference_is_not_lag_from_the_predecessor():
+    # gpu4 is fast and waits ~50 ms for gpu3, which computes normally for the ring.
+    lg = make()
+    s = stats(compute=[0.180, 0.178, 0.285, 0.185, 0.133], wait=[0.11, 0.17, 0.007, 0.10, 0.17])
+    s["pred_lag"] = {"gpu0": 0.001, "gpu1": 0.003, "gpu2": 0.001, "gpu3": 0.100, "gpu4": 0.047}
+    assert lg.residual_lag(s, "gpu3", "gpu4") == pytest.approx(0.0)
+    assert not lg.lag_from(s, "gpu3", "gpu4", floor=0.03)
+    # A slow link: same compute, lag on top of it.
+    link = stats(compute=[0.1] * 5, wait=[0.1] * 5)
+    link["pred_lag"] = {"gpu0": 0.0, "gpu1": 0.0, "gpu2": 0.0, "gpu3": 0.075, "gpu4": 0.001}
+    assert lg.residual_lag(link, "gpu2", "gpu3") == pytest.approx(0.075)
+
+
+def test_a_node_hidden_behind_a_bigger_straggler_is_not_critical():
+    lg = make()
+    s = stats(compute=[0.180, 0.178, 0.285, 0.185, 0.133], wait=[0.11, 0.17, 0.007, 0.10, 0.17])
+    s["pred_lag"] = {"gpu0": 0.001, "gpu1": 0.003, "gpu2": 0.001, "gpu3": 0.100, "gpu4": 0.047}
+    assert lg.critical(s, "gpu2", RING, floor=0.03)
+    assert not lg.critical(s, "gpu3", RING, floor=0.03)
+
+
+def test_a_slow_link_is_critical_even_though_everyone_waits_alike():
+    # Docker network fault: waits are noisy and gpu2 is not the least-waiting node.
+    lg = make()
+    s = stats(compute=[0.10] * 5, wait=[0.125, 0.117, 0.123, 0.105, 0.108])
+    s["pred_lag"] = {"gpu0": 0.002, "gpu1": 0.001, "gpu2": 0.001, "gpu3": 0.075, "gpu4": 0.002}
+    assert lg.critical(s, "gpu2", RING, floor=0.025)
+    assert lg.implicated(s, "gpu2", RING, floor=0.025)
+    assert not lg.implicated(s, "gpu3", RING, floor=0.025)
+
+
+def test_slow_node_hidden_behind_a_slower_one_is_not_implicated():
+    # gpu2 +150 ms, gpu3 +75 ms: gpu3 is slow but waits on gpu2, so it costs nothing.
+    lg = make()
+    s = stats(compute=[0.10, 0.10, 0.25, 0.175, 0.10], wait=[0.15, 0.15, 0.0, 0.075, 0.15])
+    s["pred_lag"] = {"gpu0": 0.0, "gpu1": 0.0, "gpu2": 0.0, "gpu3": 0.075, "gpu4": 0.075}
+    assert lg.slow_compute(s, "gpu3", floor=0.02)
+    assert not lg.implicated(s, "gpu3", RING, floor=0.02)
+    assert lg.implicated(s, "gpu2", RING, floor=0.02)
+    assert not lg.is_self_outlier(s, "gpu3", RING, floor=0.02)
 
 
 def test_classify_high_compute_is_compute():

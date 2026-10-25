@@ -165,23 +165,66 @@ class Lifeguard:
             return False
         return exceeds(statistics.median(values.values()), mine, self.factor, floor)
 
-    def lag_from(self, stats, succ, floor):
-        """Did `succ` report lag originating at its predecessor this step?"""
+    @staticmethod
+    def residual_lag(stats, node, succ):
+        """The part of `succ`'s pred_lag that `node` computing longer than
+        `succ` does not explain. A slow link shows up here; a node that is
+        merely slower than one fast neighbour does not [OUR CHOICE]."""
+        lag = stats.get("pred_lag", {}).get(succ)
+        if lag is None:
+            return None
+        computes = stats.get("compute_t", {})
+        skew = (max(0.0, computes[node] - computes[succ])
+                if node in computes and succ in computes else 0.0)
+        return max(0.0, lag - skew)
+
+    def lag_from(self, stats, node, succ, floor):
+        """Did `succ` report lag that originates at `node` and is not just
+        `node` computing longer than `succ`?"""
         values = stats.get("pred_lag", {})
-        if succ not in values or len(values) < 2:
+        residual = self.residual_lag(stats, node, succ)
+        if residual is None or len(values) < 2:
             return False
-        return exceeds(values[succ], statistics.median(values.values()), self.factor, floor)
+        return exceeds(residual, statistics.median(values.values()), self.factor, floor)
 
-    def implicated(self, stats, node, succ, floor):
-        """Does the ring view point at `node` (with successor `succ`) as a
-        straggler this step? Slow compute, the waits-least signature, or its
-        successor reporting lag that originates at it."""
+    @staticmethod
+    def successor(ring, node):
+        return ring[(ring.index(node) + 1) % len(ring)]
+
+    def delay_score(self, stats, node, ring):
+        """How much `node` delays the ring this step: its compute beyond the
+        median (a slow GPU), or the lag at its successor that its compute does
+        not explain (a slow link), whichever is larger."""
+        computes = stats.get("compute_t", {})
+        excess = (max(0.0, computes[node] - statistics.median(computes.values()))
+                  if node in computes else 0.0)
+        residual = self.residual_lag(stats, node, self.successor(ring, node)) or 0.0
+        return max(excess, residual)
+
+    def critical(self, stats, node, ring, floor):
+        """Is `node` the one setting the step time, rather than hidden behind a
+        bigger straggler? Its delay score must be within `floor` of the highest
+        in the ring. A node slower than the rest but faster than another
+        straggler costs the job nothing [OUR CHOICE]."""
+        scores = {m: self.delay_score(stats, m, ring) for m in ring
+                  if m in stats.get("compute_t", {}) or m in stats.get("pred_lag", {})}
+        if node not in scores:
+            return True
+        return scores[node] >= max(scores.values()) - floor
+
+    def implicated(self, stats, node, ring, floor):
+        """Does the ring view point at `node` as the straggler this step? It
+        must be on the critical path, and show slow compute, the waits-least
+        signature, or lag from it that its compute does not explain."""
+        if not self.critical(stats, node, ring, floor):
+            return False
         return (self.slow_compute(stats, node, floor) or self.waits_least(stats, node, floor)
-                or self.lag_from(stats, succ, floor))
+                or self.lag_from(stats, node, self.successor(ring, node), floor))
 
-    def is_self_outlier(self, stats, self_id, succ, floor):
-        """Am I the slow one? If so, my view of others is not trusted (6.2)."""
-        return self.implicated(stats, self_id, succ, floor)
+    def is_self_outlier(self, stats, self_id, ring, floor):
+        """Am I the slow one? If so, my view of others is not trusted (6.2).
+        A node that is slow but hidden behind a slower one is not."""
+        return self.implicated(stats, self_id, ring, floor)
 
     def classify(self, stats_window, suspect, floor):
         """FALCON split (6.5): mostly-slow compute_t -> compute, else network."""
