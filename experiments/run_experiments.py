@@ -18,6 +18,7 @@ for development machines without Docker [OUR CHOICE].
 import argparse
 import csv
 import json
+import math
 import os
 import statistics
 import subprocess
@@ -28,6 +29,9 @@ from datetime import datetime
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 RESULTS = os.path.join(REPO, "results")
+HISTORY = os.path.join(RESULTS, "history.csv")
+HISTORY_FIELDS = ("run_id", "mode", "n", "ring_up_s", "calibrate_s", "state_bytes",
+                  "chunk_bytes", "bandwidth_bps", "healthy_step_t", "warmup_steps")
 
 FAILED = "Failed"
 LEFT = "Left"
@@ -179,7 +183,8 @@ def apply_cpu_limit(run_id, fault, ground_truth):
     ground_truth["faults_applied"].append(dict(fault))
 
 
-def run_scenario(name, n, steps, local, overrides, run_id=None, action_cost=None):
+def run_scenario(name, n, steps, local, overrides, run_id=None, action_cost=None,
+                 r_percentile=50):
     scenario = scenarios(n, steps)[name]
     if scenario.get("docker_only") and local:
         print(f"skipping {name}: needs Docker")
@@ -208,7 +213,7 @@ def run_scenario(name, n, steps, local, overrides, run_id=None, action_cost=None
             if g["node"] == node_name(f["node"]) and g["type"] == f["type"]:
                 g["start_ts"] = f["start_ts"]
     save_json(os.path.join(run_dir, "ground_truth.json"), ground_truth)
-    return summarize(run_id, action_cost)
+    return summarize(run_id, action_cost, r_percentile)
 
 
 # --- Scoring (section 9) -----------------------------------------------------------
@@ -303,7 +308,95 @@ def straggler_cost(logs, about, n, onset, confirm_step, action_cost):
     return cost
 
 
-def summarize(run_id, action_cost=None):
+# --- Estimating R from previous runs (--action-cost auto) --------------------------------
+# R for "drop the straggler and re-form the ring" =
+#     T_ring   past ring formation time at this mode and N (smallest RING_UP connect
+#              time across a run's nodes: the last node up waits least, which is
+#              closest to re-forming a ring whose members are all running)
+#   + T_state  state bytes / this run's effective all-reduce bandwidth
+#   + T_warmup warmup steps x this run's healthy step time
+# Each scored run adds its row to results/history.csv. Rebalancing (R ~ 0) and
+# checkpoint/restart (needs checkpoint size and disk speed) are not modelled.
+
+def ring_profile(run_id, gt, logs, healthy_until):
+    """This run's ring-formation numbers, or None if it predates RING_UP."""
+    n = gt["n"]
+    ups = [e for records in logs.values() if records
+           for e in records[0]["events"] if e["type"] == "RING_UP"]
+    if len(ups) < n:
+        return None
+    warmup = ups[0]["warmup_steps"]
+    chunk_bytes = ups[0]["chunk_bytes"]
+    healthy = [r for records in logs.values() for r in records
+               if warmup <= r["step"] < healthy_until]
+    step_t = statistics.median(r["step_t"] for r in healthy) if healthy else None
+    comm = statistics.median(r["step_t"] - r["compute_t"] for r in healthy) if healthy else None
+    # Each node sends and receives 2(N-1) chunks per step.
+    bandwidth = 2 * (n - 1) * chunk_bytes / comm if comm else None
+    return {"run_id": run_id, "mode": gt.get("mode"), "n": n,
+            "ring_up_s": min(e["connect_s"] for e in ups),
+            "calibrate_s": max(e["calibrate_s"] for e in ups),
+            "state_bytes": ups[0]["state_bytes"], "chunk_bytes": chunk_bytes,
+            "bandwidth_bps": round(bandwidth) if bandwidth else None,
+            "healthy_step_t": round(step_t, 4) if step_t else None, "warmup_steps": warmup}
+
+
+def load_history():
+    if not os.path.exists(HISTORY):
+        return []
+    rows = []
+    with open(HISTORY, newline="", encoding="utf-8") as fh:
+        for row in csv.DictReader(fh):
+            for key in HISTORY_FIELDS[2:]:
+                if row[key] in ("", None):
+                    row[key] = None
+                elif key in ("n", "state_bytes", "chunk_bytes", "bandwidth_bps", "warmup_steps"):
+                    row[key] = int(float(row[key]))
+                else:
+                    row[key] = float(row[key])
+            rows.append(row)
+    return rows
+
+
+def save_history(profile):
+    """Add this run's row, replacing an earlier row for the same run."""
+    rows = [r for r in load_history() if r["run_id"] != profile["run_id"]] + [profile]
+    with open(HISTORY, "w", newline="", encoding="utf-8") as fh:
+        writer = csv.DictWriter(fh, HISTORY_FIELDS)
+        writer.writeheader()
+        writer.writerows({k: r.get(k) for k in HISTORY_FIELDS} for r in rows)
+
+
+def percentile(values, pct):
+    """Nearest-rank percentile: the smallest value with at least pct% at or below it."""
+    ordered = sorted(values)
+    return ordered[max(0, math.ceil(pct / 100 * len(ordered)) - 1)]
+
+
+def estimate_action_cost(profile, history, pct):
+    """R from previous runs of the same mode, plus this run's own figures."""
+    past = [h for h in history if h["run_id"] != profile["run_id"]
+            and h["mode"] == profile["mode"] and h["ring_up_s"] is not None]
+    if past:
+        nearest = min({h["n"] for h in past}, key=lambda m: (abs(m - profile["n"]), m))
+        pool = [h for h in past if h["n"] == nearest]
+        source = (f"{len(pool)} previous {profile['mode']} run(s) at N={nearest}"
+                  + ("" if nearest == profile["n"] else " (nearest N)"))
+    else:
+        pool, source = [profile], "this run only (no history yet)"
+    t_ring = percentile([h["ring_up_s"] for h in pool], pct)
+    pool_bw = [h["bandwidth_bps"] for h in pool if h["bandwidth_bps"]]
+    bandwidth = profile["bandwidth_bps"] or (statistics.median(pool_bw) if pool_bw else None)
+    t_state = profile["state_bytes"] / bandwidth if bandwidth else 0.0
+    pool_step = [h["healthy_step_t"] for h in pool if h["healthy_step_t"]]
+    step_t = profile["healthy_step_t"] or (statistics.median(pool_step) if pool_step else 0.0)
+    t_warmup = profile["warmup_steps"] * step_t
+    return {"R_s": round(t_ring + t_state + t_warmup, 3), "source": source,
+            "percentile": pct, "t_ring_s": round(t_ring, 4), "t_state_s": round(t_state, 4),
+            "t_warmup_s": round(t_warmup, 4)}
+
+
+def summarize(run_id, action_cost=None, r_percentile=50):
     run_dir = os.path.join(RESULTS, run_id)
     gt = load_json(os.path.join(run_dir, "ground_truth.json"))
     n = gt["n"]
@@ -311,6 +404,20 @@ def summarize(run_id, action_cost=None):
     faulty = {f["node"] for f in gt["faults"]}
     healthy = [node_name(i) for i in range(n) if node_name(i) not in faulty]
     views = failed_views(logs)
+
+    starts = [fault_start(f, logs)[0] for f in gt["faults"]]
+    healthy_until = min((s for s in starts if s is not None), default=10 ** 9)
+    profile = ring_profile(run_id, gt, logs, healthy_until)
+    estimate = None
+    if action_cost == "auto":
+        if profile is None:
+            print(f"{run_id}: no RING_UP events (older run), cannot estimate R")
+            action_cost = None
+        else:
+            estimate = estimate_action_cost(profile, load_history(), r_percentile)
+            action_cost = estimate["R_s"]
+    if profile is not None:
+        save_history(profile)
 
     detections = []
     for fault in gt["faults"]:
@@ -338,6 +445,8 @@ def summarize(run_id, action_cost=None):
         onset = raised[2]["window"][0] if raised and raised[2].get("window") else start_step
         row.update(straggler_cost(logs, about, n, onset, confirm[1] if confirm else None,
                                   action_cost))
+        row["action_cost_source"] = (estimate["source"] if estimate
+                                     else "given" if action_cost is not None else None)
         detections.append(row)
 
     fp = [(o, a) for o, v in views.items() for a in v if a in healthy]
@@ -377,6 +486,9 @@ def summarize(run_id, action_cost=None):
         "median_step_t_before_fault": median_step(warmup, first_fault) if first_fault else None,
         "median_step_t_during_fault": median_step(first_fault, 10 ** 9) if first_fault else None,
         "max_lhm": {node: max(r["lhm"] for r in records) for node, records in logs.items()},
+        "action_cost": estimate or ({"R_s": action_cost, "source": "given"}
+                                    if action_cost is not None else None),
+        "ring_profile": profile,
     }
     save_json(os.path.join(run_dir, "summary.json"), summary)
     write_csv(os.path.join(run_dir, "summary.csv"), summary)
@@ -425,6 +537,10 @@ def load_json(path):
         return json.load(fh)
 
 
+def action_cost_arg(text):
+    return "auto" if text.strip().lower() == "auto" else float(text)
+
+
 def parse_overrides(pairs):
     out = {}
     for pair in pairs or []:
@@ -437,6 +553,10 @@ def print_summary(s):
     if s is None:
         return
     print(f"\n== {s['scenario']} (n={s['n']}, run {s['run_id']})")
+    ac = s.get("action_cost")
+    if ac and ac["source"] != "given":
+        print(f"  R = {ac['R_s']} s = ring {ac['t_ring_s']} + state {ac['t_state_s']} "
+              f"+ warmup {ac['t_warmup_s']} (ring time: p{ac['percentile']} of {ac['source']})")
     for d in s["detections"]:
         status = (f"detected by {d['detected_by']} as {d['class']} "
                   f"({'correct' if d['class_correct'] else 'WRONG'} class), "
@@ -481,8 +601,12 @@ def main(argv=None):
     p.add_argument("run_id")
     for name in ("run", "all", "summarize"):
         sub.choices[name].add_argument(
-            "--action-cost", type=float, metavar="R",
-            help="one-off cost of acting on a straggler, in seconds; reports when acting pays off")
+            "--action-cost", type=action_cost_arg, metavar="R",
+            help="one-off cost of acting on a straggler: seconds, or 'auto' to estimate it "
+                 "from results/history.csv; reports when acting pays off")
+        sub.choices[name].add_argument(
+            "--r-percentile", type=int, default=50, metavar="P",
+            help="with --action-cost auto: percentile of past ring formation times (default 50)")
     args = parser.parse_args(argv)
 
     if args.cmd == "list":
@@ -490,7 +614,7 @@ def main(argv=None):
             print(f"{name:15s} faults={sc['faults']} env={sc.get('env', {})}")
         return
     if args.cmd == "summarize":
-        print_summary(summarize(args.run_id, args.action_cost))
+        print_summary(summarize(args.run_id, args.action_cost, args.r_percentile))
         return
     if args.n < 3:
         parser.error("--n must be at least 3")
@@ -499,11 +623,12 @@ def main(argv=None):
         if args.scenario not in scenarios(args.n, args.steps):
             parser.error(f"unknown scenario {args.scenario!r}")
         print_summary(run_scenario(args.scenario, args.n, args.steps, args.local, overrides,
-                                   args.run_id, args.action_cost))
+                                   args.run_id, args.action_cost, args.r_percentile))
     elif args.cmd == "all":
         for name in scenarios(args.n, args.steps):
             print_summary(run_scenario(name, args.n, args.steps, args.local, overrides,
-                                       action_cost=args.action_cost))
+                                       action_cost=args.action_cost,
+                                       r_percentile=args.r_percentile))
     elif args.cmd == "overhead":
         print(json.dumps(overhead(args.n, args.steps, args.local, overrides), indent=2))
 
